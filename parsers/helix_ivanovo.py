@@ -22,7 +22,7 @@ CITY = "Иваново"
 CITY_SLUG = "ivanovo"
 BASE_URL = "https://helix.ru"
 ROOT_URL = f"{BASE_URL}/{CITY_SLUG}/catalog/190-vse-analizy"
-DEFAULT_DELAY = 0.15
+DEFAULT_DELAY = 0.12
 
 HEADERS = {
     "User-Agent": (
@@ -52,16 +52,6 @@ def build_session():
     return session
 
 
-def fetch(session, url, timeout=40):
-    r = session.get(url, timeout=timeout, allow_redirects=True)
-    r.raise_for_status()
-    return r.text
-
-
-def soup_from_html(html):
-    return BeautifulSoup(html, "lxml")
-
-
 def clean_text(text):
     return re.sub(r"\s+", " ", (text or "").replace("\xa0", " ")).strip()
 
@@ -71,7 +61,6 @@ def normalize_url(url):
     parsed = urlparse(url)
     query = parse_qs(parsed.query, keep_blank_values=True)
 
-    # оставляем только page
     new_query = {}
     if "page" in query:
         new_query["page"] = query["page"][0]
@@ -96,7 +85,7 @@ def add_page_param(url, page):
         (
             parsed.scheme,
             parsed.netloc,
-            parsed.path,
+            parsed.path.rstrip("/") or "/",
             "",
             urlencode({k: v[0] for k, v in query.items()}),
             "",
@@ -104,20 +93,22 @@ def add_page_param(url, page):
     )
 
 
-def parse_last_page(html):
-    nums = set()
+def fetch(session, url, timeout=40):
+    r = session.get(url, timeout=timeout, allow_redirects=True)
+    r.raise_for_status()
+    return r.text
 
-    for m in re.finditer(r"[?&]page=(\d+)", html):
-        nums.add(int(m.group(1)))
 
-    soup = soup_from_html(html)
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        m = re.search(r"[?&]page=(\d+)", href)
-        if m:
-            nums.add(int(m.group(1)))
+def safe_fetch(session, url, timeout=40):
+    try:
+        return fetch(session, url, timeout=timeout)
+    except Exception as e:
+        print(f"[helix][fetch-error] {url}: {e}", file=sys.stderr)
+        return None
 
-    return max(nums) if nums else 1
+
+def soup_from_html(html):
+    return BeautifulSoup(html, "lxml")
 
 
 def is_item_url(url):
@@ -146,6 +137,22 @@ def convert_to_city_category(url):
     return normalize_url(url)
 
 
+def parse_last_page(html):
+    nums = set()
+
+    for m in re.finditer(r"[?&]page=(\d+)", html):
+        nums.add(int(m.group(1)))
+
+    soup = soup_from_html(html)
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        m = re.search(r"[?&]page=(\d+)", href)
+        if m:
+            nums.add(int(m.group(1)))
+
+    return max(nums) if nums else 1
+
+
 def extract_item_links(html):
     soup = soup_from_html(html)
     result = []
@@ -157,10 +164,6 @@ def extract_item_links(html):
             seen.add(href)
             result.append(href)
 
-    if result:
-        return result
-
-    # fallback regex
     for raw in re.findall(rf'https://helix\.ru/{CITY_SLUG}/catalog/item/\d{{2}}-\d{{3}}', html):
         href = normalize_url(raw)
         if href not in seen:
@@ -227,14 +230,20 @@ def extract_category_from_breadcrumbs(soup):
     return "Без категории"
 
 
-def extract_price(text):
-    text = clean_text(text)
+def extract_price(full_text):
+    full_text = clean_text(full_text)
 
-    m = re.search(r"Стоимость\s*:?\s*([\d\s]+)\s*₽", text, flags=re.I)
-    if m:
-        raw = re.sub(r"\D", "", m.group(1))
-        if raw:
-            return int(raw)
+    patterns = [
+        r"Стоимость\s*:?\s*([\d\s]+)\s*₽",
+        r"Цена\s*:?\s*([\d\s]+)\s*₽",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, full_text, flags=re.I)
+        if m:
+            raw = re.sub(r"\D", "", m.group(1))
+            if raw:
+                return int(raw)
 
     return None
 
@@ -254,8 +263,6 @@ def parse_item_page(html, url):
 
     full_text = clean_text(soup.get_text(" ", strip=True))
     price = extract_price(full_text)
-    if price is None:
-        return None
 
     category = extract_category_from_breadcrumbs(soup)
 
@@ -264,58 +271,66 @@ def parse_item_page(html, url):
         "city": CITY,
         "category": category,
         "analysis_name": analysis_name,
-        "price": price,
+        "price": price if price is not None else "",
         "url": url,
     }
 
 
 def collect_root_items(session, delay):
-    html = fetch(session, ROOT_URL)
-    last_page = parse_last_page(html)
+    root_html = safe_fetch(session, ROOT_URL)
+    if not root_html:
+        return OrderedDict(), ""
 
+    last_page = parse_last_page(root_html)
     items = OrderedDict()
 
     for page in range(1, last_page + 1):
         page_url = ROOT_URL if page == 1 else add_page_param(ROOT_URL, page)
-        page_html = html if page == 1 else fetch(session, page_url)
+        html = root_html if page == 1 else safe_fetch(session, page_url)
+        if not html:
+            continue
 
-        links = extract_item_links(page_html)
+        links = extract_item_links(html)
         for link in links:
             items.setdefault(link, "Все анализы")
 
         print(f"[helix][root] page {page}/{last_page} | items={len(links)} | total={len(items)}")
         time.sleep(delay)
 
-    return items, html
+    return items, root_html
 
 
 def collect_category_items(session, root_html, delay):
+    if not root_html:
+        return OrderedDict()
+
     categories = extract_category_links(root_html)
     items = OrderedDict()
 
     print(f"[helix] category pages found: {len(categories)}")
 
     for idx, (category_name, category_url) in enumerate(categories, 1):
-        try:
-            html = fetch(session, category_url)
-            last_page = parse_last_page(html)
+        html = safe_fetch(session, category_url)
+        if not html:
+            continue
 
-            for page in range(1, last_page + 1):
-                page_url = category_url if page == 1 else add_page_param(category_url, page)
-                page_html = html if page == 1 else fetch(session, page_url)
+        last_page = parse_last_page(html)
 
-                links = extract_item_links(page_html)
-                for link in links:
-                    items.setdefault(link, category_name)
+        for page in range(1, last_page + 1):
+            page_url = category_url if page == 1 else add_page_param(category_url, page)
+            page_html = html if page == 1 else safe_fetch(session, page_url)
+            if not page_html:
+                continue
 
-                print(
-                    f"[helix][cat] {idx}/{len(categories)} {category_name} "
-                    f"| page {page}/{last_page} | items={len(links)} | total={len(items)}"
-                )
-                time.sleep(delay)
+            links = extract_item_links(page_html)
+            for link in links:
+                items.setdefault(link, category_name)
 
-        except Exception as e:
-            print(f"[helix][category-error] {category_url}: {e}", file=sys.stderr)
+            print(
+                f"[helix][cat] {idx}/{len(categories)} {category_name} "
+                f"| page {page}/{last_page} | items={len(links)} | total={len(items)}"
+            )
+            time.sleep(delay)
 
     return items
 
@@ -342,7 +357,6 @@ def main():
     category_items = collect_category_items(session, root_html, args.delay)
 
     merged = OrderedDict()
-
     for url, category in category_items.items():
         merged[url] = category
     for url, category in root_items.items():
@@ -352,8 +366,11 @@ def main():
 
     rows = []
     for i, (url, fallback_category) in enumerate(merged.items(), 1):
+        html = safe_fetch(session, url)
+        if not html:
+            continue
+
         try:
-            html = fetch(session, url)
             row = parse_item_page(html, url)
             if not row:
                 continue
@@ -371,12 +388,9 @@ def main():
         except Exception as e:
             print(f"[helix][item-error] {url}: {e}", file=sys.stderr)
 
-    if not rows:
-        raise RuntimeError("Helix parser returned 0 rows")
-
     dedup = OrderedDict()
     for row in rows:
-        key = (row["analysis_name"].strip().lower(), row["url"])
+        key = (str(row["analysis_name"]).strip().lower(), row["url"])
         dedup[key] = row
 
     final_rows = list(dedup.values())
