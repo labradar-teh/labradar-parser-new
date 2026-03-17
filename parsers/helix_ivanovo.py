@@ -11,7 +11,8 @@ from bs4 import BeautifulSoup
 CITY = "Иваново"
 LAB = "Helix"
 BASE_URL = "https://helix.ru/ivanovo/catalog/190-vse-analizy"
-OUTPUT_FILE = "out/helix_ivanovo.csv"
+OUTPUT_CSV = "out/helix_ivanovo.csv"
+OUTPUT_XLSX = "out/helix_ivanovo.xlsx"
 
 HEADERS = {
     "User-Agent": (
@@ -47,40 +48,31 @@ def extract_price(text: str):
     return nums[-1] if nums else None
 
 
-def parse_card_text(text: str):
+def normalize_name(text: str) -> str:
     text = clean_text(text)
 
-    # убираем хвосты
-    text = text.replace("Заказать", " ")
-    text = text.replace("До 00:00 следующего дня. Указанный срок не включает день взятия биоматериала", " ")
+    # вырезаем цену
+    text = re.sub(r"\d[\d ]{0,12}\s*(?:₽|руб)", " ", text, flags=re.I)
+
+    # вырезаем сроки
+    text = re.sub(r"До\s+\d+\s+суток.*", " ", text, flags=re.I)
+    text = re.sub(r"До\s+\d+\s+раб\.\s*дн.*", " ", text, flags=re.I)
+
+    # вырезаем служебный текст
+    garbage_patterns = [
+        r"Указанный срок не включает день взятия биоматериала.*",
+        r"Заказать.*",
+        r"Сдать дома.*",
+        r"В корзину.*",
+    ]
+    for pattern in garbage_patterns:
+        text = re.sub(pattern, " ", text, flags=re.I)
+
+    # убираем лидирующие слова
+    text = re.sub(r"^(Анализ|Комплекс)\s+", "", text, flags=re.I)
+
     text = clean_text(text)
-
-    price = extract_price(text)
-    if price is None:
-        return None, None
-
-    # убираем дубли цены из текста
-    text_wo_price = re.sub(r"\d[\d ]{0,12}\s*(?:₽|руб)", " ", text, flags=re.I)
-    text_wo_price = clean_text(text_wo_price)
-
-    # убираем префиксы
-    text_wo_price = re.sub(r"^(Анализ|Комплекс)\s+", "", text_wo_price, flags=re.I)
-    text_wo_price = clean_text(text_wo_price)
-
-    # если в начале есть код вида 02-001
-    m = re.match(r"^(\d{2}-\d{3,})\s+(.+)$", text_wo_price)
-    if m:
-        code = m.group(1)
-        name = m.group(2)
-    else:
-        code = ""
-        name = text_wo_price
-
-    name = clean_text(name)
-    if len(name) < 4:
-        return None, None
-
-    return name, price
+    return text
 
 
 def parse_page(url: str):
@@ -90,7 +82,6 @@ def parse_page(url: str):
 
     rows = []
 
-    # На Helix карточки анализов — это ссылки в основном контенте страницы.
     for a in soup.select("a[href]"):
         href = a.get("href") or ""
         text = clean_text(a.get_text(" ", strip=True))
@@ -98,28 +89,26 @@ def parse_page(url: str):
         if not text:
             continue
 
-        # Берем только элементы, где реально есть цена
         if "₽" not in text and "руб" not in text.lower():
             continue
 
-        # Ищем именно анализы/комплексы
-        if not (text.startswith("Анализ") or text.startswith("Комплекс")):
+        if not href.startswith("/catalog/item/"):
             continue
 
-        name, price = parse_card_text(text)
-        if not name or price is None:
+        price = extract_price(text)
+        if price is None:
+            continue
+
+        name = normalize_name(text)
+        if len(name) < 4:
             continue
 
         full_url = urljoin(url, href)
 
-        category = "Анализы"
-        if text.startswith("Комплекс"):
-            category = "Комплексы"
-
         rows.append({
             "lab": LAB,
             "city": CITY,
-            "category": category,
+            "category": "Анализы",
             "analysis_name": name,
             "price": price,
             "url": full_url,
@@ -140,7 +129,7 @@ def main():
             break
 
         all_rows.extend(rows)
-        time.sleep(0.5)
+        time.sleep(0.4)
 
     os.makedirs("out", exist_ok=True)
 
@@ -148,18 +137,22 @@ def main():
 
     if df.empty:
         df = pd.DataFrame(columns=["lab", "city", "category", "analysis_name", "price", "url"])
-        df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
-        print(f"Saved empty file: {OUTPUT_FILE}")
+        df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+        df.to_excel(OUTPUT_XLSX, index=False)
+        print("EMPTY RESULT")
         return
 
     df["analysis_name"] = df["analysis_name"].astype(str).str.strip()
-    df["category"] = df["category"].astype(str).str.strip()
     df = df[df["analysis_name"].str.len() > 2].copy()
-    df = df.drop_duplicates(subset=["lab", "city", "category", "analysis_name", "price"]).copy()
-    df = df.sort_values(["category", "analysis_name"]).reset_index(drop=True)
 
-    df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
-    print(f"Saved: {OUTPUT_FILE}")
+    df = df.drop_duplicates(subset=["lab", "analysis_name", "price", "url"]).copy()
+    df = df.sort_values(["analysis_name"]).reset_index(drop=True)
+
+    df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+    df.to_excel(OUTPUT_XLSX, index=False)
+
+    print(f"Saved CSV: {OUTPUT_CSV}")
+    print(f"Saved XLSX: {OUTPUT_XLSX}")
     print(f"Rows: {len(df)}")
 
 
