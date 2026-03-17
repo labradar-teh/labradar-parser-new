@@ -8,13 +8,13 @@ on:
 jobs:
   parse-helix-ivanovo:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -22,42 +22,73 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 pandas openpyxl lxml
+          pip install requests beautifulsoup4 pandas openpyxl lxml urllib3
 
-      - name: Create output directory
-        run: mkdir -p output
+      - name: Prepare folders
+        run: |
+          mkdir -p output
+          mkdir -p out
+
+      - name: Show parser file
+        run: |
+          ls -lah parsers
+          python --version
 
       - name: Run Helix parser
         run: |
+          set -euxo pipefail
           python parsers/helix_ivanovo.py --outdir output
 
-      - name: Show output files
+      - name: Debug output
+        if: always()
         run: |
-          ls -lah output
-          echo "CSV preview:"
-          python - << 'PY'
-          import pandas as pd
-          from pathlib import Path
+          echo "=== output ==="
+          ls -lah output || true
+          echo "=== out ==="
+          ls -lah out || true
 
-          csv_file = Path("output/helix_ivanovo.csv")
-          if csv_file.exists():
-              df = pd.read_csv(csv_file)
-              print(df.head(20).to_string(index=False))
-              print(f"\nRows: {len(df)}")
-          else:
-              print("CSV not found")
+          python - << 'PY'
+          from pathlib import Path
+          import pandas as pd
+
+          candidates = [
+              Path("output/helix_ivanovo.csv"),
+              Path("out/helix_ivanovo.csv"),
+          ]
+
+          found = False
+          for csv_file in candidates:
+              if csv_file.exists():
+                  found = True
+                  print(f"FOUND: {csv_file}")
+                  try:
+                      df = pd.read_csv(csv_file)
+                      print(f"Rows: {len(df)}")
+                      if len(df) > 0:
+                          print(df.head(20).to_string(index=False))
+                  except Exception as e:
+                      print(f"CSV read error: {e}")
+
+          if not found:
+              print("No helix CSV found")
           PY
 
-      - name: Upload CSV artifact
+      - name: Upload CSV artifact from output
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: helix-ivanovo-csv
-          path: output/helix_ivanovo.csv
+          path: |
+            output/helix_ivanovo.csv
+            out/helix_ivanovo.csv
           if-no-files-found: error
 
-      - name: Upload XLSX artifact
+      - name: Upload XLSX artifact from output
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: helix-ivanovo-xlsx
-          path: output/helix_ivanovo.xlsx
-          if-no-files-found: error
+          path: |
+            output/helix_ivanovo.xlsx
+            out/helix_ivanovo.xlsx
+          if-no-files-found: ignore
