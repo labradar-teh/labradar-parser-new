@@ -53,22 +53,36 @@ def parse_page(url: str):
         return []
 
     rows = []
-    cards = soup.select(".catalog-item, .analysis-card, .service-card, .product-card, article, li")
+
+    # Более мягкий набор селекторов
+    cards = soup.select("article, li, .catalog-item, .analysis-card, .service-card, .product-card, .item")
 
     for card in cards:
         name = ""
-        for sel in ["h3", "h2", "[class*='title']", "a[href]"]:
+        for sel in [
+            "h1",
+            "h2",
+            "h3",
+            "[class*='title']",
+            "[class*='name']",
+            "a[href]",
+        ]:
             node = card.select_one(sel)
             if node:
                 name = clean_text(node.get_text(" ", strip=True))
-                if name:
+                if name and len(name) > 3:
                     break
 
         if not name or len(name) < 4:
             continue
 
         price = None
-        for sel in ["[class*='price']", ".price"]:
+        for sel in [
+            "[class*='price']",
+            ".price",
+            "[class*='cost']",
+            "[data-price]",
+        ]:
             node = card.select_one(sel)
             if node:
                 price = extract_price(clean_text(node.get_text(" ", strip=True)))
@@ -110,16 +124,22 @@ def main():
         all_rows.extend(rows)
         time.sleep(0.5)
 
+    os.makedirs("out", exist_ok=True)
+
     df = pd.DataFrame(all_rows)
+
+    # Не падаем, даже если пусто
     if df.empty:
-        raise RuntimeError("Нет данных для сохранения")
+        df = pd.DataFrame(columns=["lab", "city", "category", "analysis_name", "price", "url"])
+        df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
+        print(f"Saved empty file: {OUTPUT_FILE}")
+        return
 
     df["analysis_name"] = df["analysis_name"].astype(str).str.strip()
     df = df[df["analysis_name"].str.len() > 2].copy()
     df = df.drop_duplicates(subset=["lab", "city", "category", "analysis_name", "price"]).copy()
     df = df.sort_values(["analysis_name"]).reset_index(drop=True)
 
-    os.makedirs("out", exist_ok=True)
     df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
     print(f"Saved: {OUTPUT_FILE}")
     print(f"Rows: {len(df)}")
