@@ -29,11 +29,6 @@ jobs:
           mkdir -p output
           mkdir -p out
 
-      - name: Show parser file
-        run: |
-          ls -lah parsers
-          python --version
-
       - name: Run Helix parser
         run: |
           set -euxo pipefail
@@ -66,6 +61,8 @@ jobs:
                       print(f"Rows: {len(df)}")
                       if len(df) > 0:
                           print(df.head(20).to_string(index=False))
+                          print("Unique URLs:", df["url"].nunique())
+                          print("Unique names:", df["analysis_name"].nunique())
                   except Exception as e:
                       print(f"CSV read error: {e}")
 
@@ -73,7 +70,7 @@ jobs:
               print("No helix CSV found")
           PY
 
-      - name: Upload CSV artifact from output
+      - name: Upload CSV artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -83,7 +80,7 @@ jobs:
             out/helix_ivanovo.csv
           if-no-files-found: error
 
-      - name: Upload XLSX artifact from output
+      - name: Upload XLSX artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
