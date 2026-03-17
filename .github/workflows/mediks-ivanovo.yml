@@ -20,6 +20,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r parsers/requirements.txt
+          python -m playwright install chromium
 
       - name: Create output folder
         run: mkdir -p out
@@ -33,3 +34,10 @@ jobs:
         with:
           name: mediks-ivanovo-csv
           path: out/mediks_ivanovo.csv
+
+      - name: Upload debug html
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediks-debug-html
+          path: out/mediks_debug.html
+          if-no-files-found: ignore
