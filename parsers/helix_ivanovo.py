@@ -9,7 +9,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
-from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
+from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import requests
@@ -19,11 +19,10 @@ from urllib3.util.retry import Retry
 
 
 LAB = "helix"
-CITY = "ivanovo"
-CITY_LABEL = "Иваново"
+CITY = "Иваново"
+CITY_SLUG = "ivanovo"
 BASE_URL = "https://helix.ru"
-ROOT_CATALOG_URL = f"{BASE_URL}/{CITY}/catalog/190-vse-analizy"
-ROOT_NAV_URL = f"{BASE_URL}/{CITY}/catalog/190-vse-analizy"
+ROOT_URL = f"{BASE_URL}/{CITY_SLUG}/catalog/190-vse-analizy"
 DEFAULT_DELAY = 0.15
 
 HEADERS = {
@@ -55,24 +54,15 @@ def build_session() -> requests.Session:
 
 
 def normalize_spaces(text: str) -> str:
-    return re.sub(r"\s+", " ", text.replace("\xa0", " ")).strip()
+    return re.sub(r"\s+", " ", (text or "").replace("\xa0", " ")).strip()
 
 
 def normalize_url(url: str) -> str:
-    parsed = urlparse(urljoin(BASE_URL, url))
-    cleaned = parsed._replace(fragment="")
-    if cleaned.query:
-        params = parse_qs(cleaned.query, keep_blank_values=True)
-        if "page" in params:
-            q = f"page={params['page'][0]}"
-        else:
-            q = ""
-        cleaned = cleaned._replace(query=q)
-    return urlunparse(cleaned)
+    return urljoin(BASE_URL, url.split("#")[0])
 
 
 def fetch(session: requests.Session, url: str, timeout: int = 40) -> str:
-    response = session.get(url, timeout=timeout)
+    response = session.get(url, timeout=timeout, allow_redirects=True)
     response.raise_for_status()
     return response.text
 
@@ -81,151 +71,296 @@ def soup_from_html(html: str) -> BeautifulSoup:
     return BeautifulSoup(html, "html.parser")
 
 
-def parse_last_page_from_html(html: str) -> int:
-    pages = [int(m.group(1)) for m in re.finditer(r"[?&]page=(\d+)", html)]
-    text_pages = [int(m.group(1)) for m in re.finditer(r">\s*(\d{1,3})\s*<", html)]
-    nums = pages + text_pages
-    return max(nums) if nums else 1
+def parse_last_page(html: str) -> int:
+    numbers = set()
+
+    for m in re.finditer(r"[?&]page=(\d+)", html):
+        numbers.add(int(m.group(1)))
+
+    soup = soup_from_html(html)
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        mm = re.search(r"[?&]page=(\d+)", href)
+        if mm:
+            numbers.add(int(mm.group(1)))
+
+    return max(numbers) if numbers else 1
 
 
-def extract_category_links(nav_html: str) -> List[Tuple[str, str]]:
-    soup = soup_from_html(nav_html)
-    items: List[Tuple[str, str]] = []
+def make_page_urls(base_url: str, last_page: int) -> List[str]:
+    if last_page <= 1:
+        return [base_url]
+    urls = [base_url]
+    for page in range(2, last_page + 1):
+        sep = "&" if "?" in base_url else "?"
+        urls.append(f"{base_url}{sep}page={page}")
+    return urls
+
+
+def is_item_url(url: str) -> bool:
+    path = urlparse(url).path
+    return path.startswith(f"/{CITY_SLUG}/catalog/item/")
+
+
+def is_category_url(url: str) -> bool:
+    path = urlparse(url).path.rstrip("/")
+    if path.startswith(f"/{CITY_SLUG}/catalog/item"):
+        return False
+    if path.startswith("/catalog/item"):
+        return False
+    return "/catalog/" in path
+
+
+def extract_item_links(html: str) -> List[str]:
+    soup = soup_from_html(html)
+    found: List[str] = []
+    seen: Set[str] = set()
+
+    for a in soup.find_all("a", href=True):
+        href = normalize_url(a["href"])
+        if not is_item_url(href):
+            continue
+        if href in seen:
+            continue
+        seen.add(href)
+        found.append(href)
+
+    if found:
+        return found
+
+    # fallback regex
+    for raw in re.findall(rf'https://helix\.ru/{CITY_SLUG}/catalog/item/\d{{2}}-\d{{3}}', html):
+        href = normalize_url(raw)
+        if href not in seen:
+            seen.add(href)
+            found.append(href)
+
+    for raw in re.findall(rf'/{CITY_SLUG}/catalog/item/\d{{2}}-\d{{3}}', html):
+        href = normalize_url(raw)
+        if href not in seen:
+            seen.add(href)
+            found.append(href)
+
+    return found
+
+
+def extract_root_category_links(html: str) -> List[Tuple[str, str]]:
+    """
+    На ивановской странице категории часто даны как /catalog/... (без /ivanovo/).
+    Мы их забираем все, а потом переводим в city-specific URL.
+    """
+    soup = soup_from_html(html)
+    found: List[Tuple[str, str]] = []
     seen: Set[str] = set()
 
     for a in soup.find_all("a", href=True):
         href = normalize_url(a["href"])
         text = normalize_spaces(a.get_text(" ", strip=True))
-        if not href.startswith(f"{BASE_URL}/{CITY}/catalog/"):
+
+        if not text:
+            continue
+        if "catalog" not in href:
             continue
         if "/catalog/item/" in href:
             continue
-        if text in {"Главная", "В каталог", "Helixbook", "Скидки и акции", "Адреса"}:
+
+        if text in {
+            "В каталог",
+            "Главная",
+            "Адреса",
+            "Скидки и акции",
+            "Helixbook",
+            "Заказать",
+            "Далее",
+        }:
             continue
-        if not re.search(r"/catalog/\d+-", href):
+
+        if text == "Все анализы":
             continue
-        if href.endswith("/190-vse-analizy"):
-            continue
+
+        # интересуют именно разделы анализов
         if href in seen:
             continue
         seen.add(href)
-        items.append((text or "Без категории", href))
+        found.append((text, href))
 
-    items.insert(0, ("Все анализы", ROOT_CATALOG_URL))
-    return items
-
-
-def make_listing_page_urls(first_page_url: str, last_page: int) -> List[str]:
-    if last_page <= 1:
-        return [first_page_url]
-    result = [first_page_url]
-    for page in range(2, last_page + 1):
-        delimiter = "&" if "?" in first_page_url else "?"
-        result.append(f"{first_page_url}{delimiter}page={page}")
-    return result
+    return found
 
 
-def extract_item_urls_from_listing(html: str) -> List[str]:
-    soup = soup_from_html(html)
-    urls: List[str] = []
-    seen: Set[str] = set()
+def to_city_category_url(generic_or_city_url: str) -> str:
+    """
+    Если уже city-specific — оставляем.
+    Если общий /catalog/... — пробуем перевести в /ivanovo/catalog/...
+    """
+    parsed = urlparse(generic_or_city_url)
+    path = parsed.path.rstrip("/")
 
-    for a in soup.find_all("a", href=True):
-        href = normalize_url(a["href"])
-        if f"/{CITY}/catalog/item/" not in href:
-            continue
-        if href in seen:
-            continue
-        seen.add(href)
-        urls.append(href)
+    if path.startswith(f"/{CITY_SLUG}/catalog/"):
+        return generic_or_city_url
 
-    if urls:
-        return urls
+    if path.startswith("/catalog/"):
+        tail = path[len("/catalog/"):]
+        return f"{BASE_URL}/{CITY_SLUG}/catalog/{tail}"
 
-    for raw in re.findall(rf'https://helix\.ru/{CITY}/catalog/item/[0-9]{{2}}-[0-9]{{3}}', html):
-        href = normalize_url(raw)
-        if href not in seen:
-            seen.add(href)
-            urls.append(href)
-
-    for raw in re.findall(rf'/{CITY}/catalog/item/[0-9]{{2}}-[0-9]{{3}}', html):
-        href = normalize_url(raw)
-        if href not in seen:
-            seen.add(href)
-            urls.append(href)
-
-    return urls
+    return generic_or_city_url
 
 
-def clean_name(text: str) -> str:
+def resolve_city_category_url(session: requests.Session, href: str) -> Optional[str]:
+    """
+    1) пробуем прямой city-specific URL
+    2) если не работает, открываем общий URL и ищем canonical/og:url для Иваново
+    """
+    candidate = to_city_category_url(href)
+
+    try:
+        r = session.get(candidate, timeout=30, allow_redirects=True)
+        if r.ok and f"/{CITY_SLUG}/catalog/" in r.url:
+            return r.url.split("#")[0]
+        if r.ok and f"/{CITY_SLUG}/catalog/" in candidate:
+            return candidate
+    except Exception:
+        pass
+
+    try:
+        html = fetch(session, href)
+        soup = soup_from_html(html)
+
+        for sel in ['link[rel="canonical"]', 'meta[property="og:url"]']:
+            for node in soup.select(sel):
+                val = node.get("href") or node.get("content")
+                if not val:
+                    continue
+                val = normalize_url(val)
+                if f"/{CITY_SLUG}/catalog/" in val:
+                    return val
+    except Exception:
+        return None
+
+    return None
+
+
+def extract_category_from_item_breadcrumbs(soup: BeautifulSoup) -> str:
+    crumbs = []
+    for el in soup.select('nav a, .breadcrumb a, [class*="breadcrumb"] a'):
+        txt = normalize_spaces(el.get_text(" ", strip=True))
+        if txt:
+            crumbs.append(txt)
+
+    blacklist = {
+        "Главная",
+        "Сдать анализы",
+        CITY,
+    }
+    crumbs = [c for c in crumbs if c not in blacklist]
+
+    if crumbs:
+        return crumbs[-1]
+    return "Без категории"
+
+
+def parse_price_from_item_page(text: str) -> Optional[int]:
     text = normalize_spaces(text)
-    text = re.sub(rf"\s+в\s+{CITY_LABEL}\s*$", "", text, flags=re.IGNORECASE)
+
+    m = re.search(r"Стоимость\s*:\s*([\d\s]+)\s*₽", text, flags=re.IGNORECASE)
+    if m:
+        return int(re.sub(r"\D", "", m.group(1)))
+
+    m = re.search(r"Стоимость\s*([\d\s]+)\s*₽", text, flags=re.IGNORECASE)
+    if m:
+        return int(re.sub(r"\D", "", m.group(1)))
+
+    return None
+
+
+def clean_item_name(text: str) -> str:
+    text = normalize_spaces(text)
+    text = re.sub(rf"\s+в\s+{re.escape(CITY)}\s*$", "", text, flags=re.IGNORECASE)
     return text.strip(" /")
 
 
-def parse_price(text: str) -> Optional[int]:
-    m = re.search(r"Стоимость\s*:?\s*([\d\s]+)\s*₽", text, flags=re.IGNORECASE)
-    if not m:
-        amounts = re.findall(r"([\d\s]+)\s*₽", text)
-        if not amounts:
-            return None
-        return int(re.sub(r"\D", "", amounts[0]))
-    return int(re.sub(r"\D", "", m.group(1)))
-
-
-def parse_helix_item_page(html: str, url: str) -> Dict[str, Optional[str]]:
+def parse_item_page(html: str, url: str) -> Optional[Dict]:
     soup = soup_from_html(html)
 
     h1 = soup.find("h1")
-    if h1:
-        name = clean_name(h1.get_text(" ", strip=True))
-    else:
-        title = soup.title.get_text(" ", strip=True) if soup.title else ""
-        name = clean_name(title.split("–")[0])
+    if not h1:
+        return None
+
+    analysis_name = clean_item_name(h1.get_text(" ", strip=True))
+    if not analysis_name:
+        return None
 
     full_text = normalize_spaces(soup.get_text(" ", strip=True))
-    price = parse_price(full_text)
+    price = parse_price_from_item_page(full_text)
+    if price is None:
+        return None
+
+    category = extract_category_from_item_breadcrumbs(soup)
 
     return {
-        "analysis_name": name,
+        "lab": LAB,
+        "city": CITY,
+        "category": category,
+        "analysis_name": analysis_name,
         "price": price,
         "url": url,
     }
 
 
-def collect_listing_map(session: requests.Session, delay: float) -> OrderedDict:
-    nav_html = fetch(session, ROOT_NAV_URL)
-    categories = extract_category_links(nav_html)
-    listing_map: OrderedDict[str, str] = OrderedDict()
+def collect_root_items(session: requests.Session, delay: float) -> OrderedDict:
+    html = fetch(session, ROOT_URL)
+    last_page = parse_last_page(html)
 
-    for category_name, category_url in categories:
-        print(f"[helix] category: {category_name} -> {category_url}")
-        html = fetch(session, category_url)
-        last_page = parse_last_page_from_html(html)
-        page_urls = make_listing_page_urls(category_url, last_page)
+    items: OrderedDict[str, str] = OrderedDict()
 
-        for idx, page_url in enumerate(page_urls, start=1):
-            if idx > 1:
-                html = fetch(session, page_url)
-            item_urls = extract_item_urls_from_listing(html)
-            print(f"  page {idx}/{last_page}: {len(item_urls)} items")
-            for item_url in item_urls:
-                existing = listing_map.get(item_url)
-                if existing in (None, "", "Все анализы") and category_name != "Все анализы":
-                    listing_map[item_url] = category_name
-                elif existing is None:
-                    listing_map[item_url] = category_name
-            time.sleep(delay)
-
-    root_html = fetch(session, ROOT_CATALOG_URL)
-    root_last_page = parse_last_page_from_html(root_html)
-    for page_url in make_listing_page_urls(ROOT_CATALOG_URL, root_last_page):
-        html = root_html if page_url == ROOT_CATALOG_URL else fetch(session, page_url)
-        for item_url in extract_item_urls_from_listing(html):
-            listing_map.setdefault(item_url, "Все анализы")
+    for idx, page_url in enumerate(make_page_urls(ROOT_URL, last_page), start=1):
+        page_html = html if idx == 1 else fetch(session, page_url)
+        page_items = extract_item_links(page_html)
+        for item_url in page_items:
+            items.setdefault(item_url, "Все анализы")
+        print(f"[helix] root pages {idx}/{last_page}: {len(page_items)} items | total={len(items)}")
         time.sleep(delay)
 
-    return listing_map
+    return items
+
+
+def collect_category_items(session: requests.Session, delay: float) -> OrderedDict:
+    root_html = fetch(session, ROOT_URL)
+    raw_categories = extract_root_category_links(root_html)
+
+    categories: OrderedDict[str, str] = OrderedDict()
+
+    for category_name, href in raw_categories:
+        city_url = resolve_city_category_url(session, href)
+        if not city_url:
+            continue
+        categories.setdefault(city_url, category_name)
+
+    print(f"[helix] resolved category pages: {len(categories)}")
+
+    items: OrderedDict[str, str] = OrderedDict()
+
+    for idx, (category_url, category_name) in enumerate(categories.items(), start=1):
+        try:
+            html = fetch(session, category_url)
+            last_page = parse_last_page(html)
+
+            for page_idx, page_url in enumerate(make_page_urls(category_url, last_page), start=1):
+                page_html = html if page_idx == 1 else fetch(session, page_url)
+                page_items = extract_item_links(page_html)
+                for item_url in page_items:
+                    items.setdefault(item_url, category_name)
+
+                print(
+                    f"[helix] category {idx}/{len(categories)} | "
+                    f"{category_name} | page {page_idx}/{last_page} | "
+                    f"items={len(page_items)} | total={len(items)}"
+                )
+                time.sleep(delay)
+
+        except Exception as exc:
+            print(f"[helix][error] category {category_url}: {exc}", file=sys.stderr)
+
+    return items
 
 
 def export_rows(rows: List[Dict], out_csv: Path, out_xlsx: Path) -> None:
@@ -245,41 +380,48 @@ def main() -> int:
     outdir.mkdir(parents=True, exist_ok=True)
 
     session = build_session()
-    listing_map = collect_listing_map(session, args.delay)
 
-    print(f"[helix] unique item urls from listings: {len(listing_map)}")
+    root_items = collect_root_items(session, args.delay)
+    category_items = collect_category_items(session, args.delay)
+
+    merged_items: OrderedDict[str, str] = OrderedDict()
+
+    for url, category in category_items.items():
+        merged_items[url] = category
+
+    for url, category in root_items.items():
+        merged_items.setdefault(url, category)
+
+    print(f"[helix] unique item urls collected: {len(merged_items)}")
 
     rows: List[Dict] = []
-    for idx, (item_url, category_name) in enumerate(listing_map.items(), start=1):
+    for idx, (item_url, fallback_category) in enumerate(merged_items.items(), start=1):
         try:
             html = fetch(session, item_url)
-            parsed = parse_helix_item_page(html, item_url)
-            if not parsed["analysis_name"] or parsed["price"] is None:
-                print(f"[helix][warn] incomplete item: {item_url}", file=sys.stderr)
+            parsed = parse_item_page(html, item_url)
+            if parsed is None:
+                print(f"[helix][warn] skip no name/price: {item_url}", file=sys.stderr)
                 continue
 
-            rows.append(
-                {
-                    "lab": LAB,
-                    "city": CITY_LABEL,
-                    "category": category_name,
-                    "analysis_name": parsed["analysis_name"],
-                    "price": int(parsed["price"]),
-                    "url": parsed["url"],
-                }
-            )
-            if idx % 100 == 0:
-                print(f"[helix] parsed {idx}/{len(listing_map)}")
-            time.sleep(args.delay)
-        except Exception as exc:
-            print(f"[helix][error] {item_url}: {exc}", file=sys.stderr)
+            if parsed["category"] == "Без категории":
+                parsed["category"] = fallback_category
 
-    deduped: OrderedDict[Tuple[str, int, str], Dict] = OrderedDict()
+            rows.append(parsed)
+
+            if idx % 100 == 0:
+                print(f"[helix] parsed {idx}/{len(merged_items)}")
+            time.sleep(args.delay)
+
+        except Exception as exc:
+            print(f"[helix][error] item {item_url}: {exc}", file=sys.stderr)
+
+    deduped: OrderedDict[Tuple[str, str], Dict] = OrderedDict()
     for row in rows:
-        key = (row["analysis_name"].lower(), row["price"], row["url"])
+        key = (row["analysis_name"].lower(), row["url"])
         deduped[key] = row
 
     final_rows = list(deduped.values())
+
     csv_path = outdir / "helix_ivanovo.csv"
     xlsx_path = outdir / "helix_ivanovo.xlsx"
     export_rows(final_rows, csv_path, xlsx_path)
