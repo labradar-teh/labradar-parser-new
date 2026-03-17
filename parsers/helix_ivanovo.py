@@ -4,15 +4,33 @@ import time
 from urllib.parse import urljoin
 
 import pandas as pd
+import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 
 
 CITY = "Иваново"
 LAB = "Helix"
 BASE_URL = "https://helix.ru/ivanovo/catalog/190-vse-analizy"
 OUTPUT_FILE = "out/helix_ivanovo.csv"
-DEBUG_HTML = "out/helix_debug.html"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/145.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+}
+
+
+def fetch(url: str):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        if r.status_code == 200:
+            return BeautifulSoup(r.text, "html.parser")
+    except Exception:
+        return None
+    return None
 
 
 def clean_text(s: str) -> str:
@@ -29,103 +47,102 @@ def extract_price(text: str):
     return nums[-1] if nums else None
 
 
-def parse_html(html: str, page_url: str):
-    soup = BeautifulSoup(html, "html.parser")
+def parse_card_text(text: str):
+    text = clean_text(text)
+
+    # убираем хвосты
+    text = text.replace("Заказать", " ")
+    text = text.replace("До 00:00 следующего дня. Указанный срок не включает день взятия биоматериала", " ")
+    text = clean_text(text)
+
+    price = extract_price(text)
+    if price is None:
+        return None, None
+
+    # убираем дубли цены из текста
+    text_wo_price = re.sub(r"\d[\d ]{0,12}\s*(?:₽|руб)", " ", text, flags=re.I)
+    text_wo_price = clean_text(text_wo_price)
+
+    # убираем префиксы
+    text_wo_price = re.sub(r"^(Анализ|Комплекс)\s+", "", text_wo_price, flags=re.I)
+    text_wo_price = clean_text(text_wo_price)
+
+    # если в начале есть код вида 02-001
+    m = re.match(r"^(\d{2}-\d{3,})\s+(.+)$", text_wo_price)
+    if m:
+        code = m.group(1)
+        name = m.group(2)
+    else:
+        code = ""
+        name = text_wo_price
+
+    name = clean_text(name)
+    if len(name) < 4:
+        return None, None
+
+    return name, price
+
+
+def parse_page(url: str):
+    soup = fetch(url)
+    if not soup:
+        return []
+
     rows = []
 
-    cards = soup.select(
-        "article, li, .catalog-item, .analysis-card, .service-card, "
-        ".product-card, .item, [class*='catalog'], [class*='product']"
-    )
+    # На Helix карточки анализов — это ссылки в основном контенте страницы.
+    for a in soup.select("a[href]"):
+        href = a.get("href") or ""
+        text = clean_text(a.get_text(" ", strip=True))
 
-    for card in cards:
-        name = ""
-        for sel in [
-            "h1", "h2", "h3",
-            "[class*='title']",
-            "[class*='name']",
-            "a[href]",
-        ]:
-            node = card.select_one(sel)
-            if node:
-                name = clean_text(node.get_text(" ", strip=True))
-                if len(name) > 3:
-                    break
-
-        if len(name) < 4:
+        if not text:
             continue
 
-        price = None
-        for sel in [
-            "[class*='price']",
-            ".price",
-            "[class*='cost']",
-            "[data-price]",
-        ]:
-            node = card.select_one(sel)
-            if node:
-                price = extract_price(clean_text(node.get_text(" ", strip=True)))
-                if price is not None:
-                    break
-
-        if price is None:
-            price = extract_price(clean_text(card.get_text(" ", strip=True)))
-
-        if price is None:
+        # Берем только элементы, где реально есть цена
+        if "₽" not in text and "руб" not in text.lower():
             continue
 
-        link_node = card.select_one("a[href]")
-        link = urljoin(page_url, link_node.get("href")) if link_node and link_node.get("href") else page_url
+        # Ищем именно анализы/комплексы
+        if not (text.startswith("Анализ") or text.startswith("Комплекс")):
+            continue
+
+        name, price = parse_card_text(text)
+        if not name or price is None:
+            continue
+
+        full_url = urljoin(url, href)
+
+        category = "Анализы"
+        if text.startswith("Комплекс"):
+            category = "Комплексы"
 
         rows.append({
             "lab": LAB,
             "city": CITY,
-            "category": "Все анализы",
+            "category": category,
             "analysis_name": name,
             "price": price,
-            "url": link,
+            "url": full_url,
         })
 
     return rows
 
 
 def main():
-    os.makedirs("out", exist_ok=True)
     all_rows = []
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+    for page_num in range(1, 90):
+        url = BASE_URL if page_num == 1 else f"{BASE_URL}?page={page_num}"
+        rows = parse_page(url)
+        print(f"page {page_num}: {len(rows)}")
 
-        for page_num in range(1, 90):
-            url = BASE_URL if page_num == 1 else f"{BASE_URL}?page={page_num}"
-            print(f"Open: {url}")
+        if not rows and page_num > 5:
+            break
 
-            try:
-                page.goto(url, wait_until="networkidle", timeout=90000)
-                page.wait_for_timeout(4000)
-            except Exception as e:
-                print(f"Open failed: {e}")
-                if page_num > 3:
-                    break
-                continue
+        all_rows.extend(rows)
+        time.sleep(0.5)
 
-            html = page.content()
-
-            if page_num == 1:
-                with open(DEBUG_HTML, "w", encoding="utf-8") as f:
-                    f.write(html)
-
-            rows = parse_html(html, url)
-            print(f"page {page_num}: {len(rows)}")
-
-            if not rows and page_num > 5:
-                break
-
-            all_rows.extend(rows)
-            time.sleep(1)
-
-        browser.close()
+    os.makedirs("out", exist_ok=True)
 
     df = pd.DataFrame(all_rows)
 
@@ -136,9 +153,10 @@ def main():
         return
 
     df["analysis_name"] = df["analysis_name"].astype(str).str.strip()
+    df["category"] = df["category"].astype(str).str.strip()
     df = df[df["analysis_name"].str.len() > 2].copy()
     df = df.drop_duplicates(subset=["lab", "city", "category", "analysis_name", "price"]).copy()
-    df = df.sort_values(["analysis_name"]).reset_index(drop=True)
+    df = df.sort_values(["category", "analysis_name"]).reset_index(drop=True)
 
     df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
     print(f"Saved: {OUTPUT_FILE}")
