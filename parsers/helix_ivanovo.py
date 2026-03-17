@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 import argparse
-import csv
 import re
 import time
 from pathlib import Path
@@ -56,7 +55,7 @@ def extract_name(html):
 def parse_item(page, url):
     try:
         page.goto(url, timeout=60000)
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(300)
         html = page.content()
     except:
         return None
@@ -77,10 +76,23 @@ def parse_item(page, url):
     }
 
 
-def scroll(page):
-    for _ in range(25):
-        page.mouse.wheel(0, 6000)
-        page.wait_for_timeout(400)
+def scroll_full(page):
+    last_count = 0
+
+    for i in range(60):  # 🔥 ключевое — много прокруток
+        page.mouse.wheel(0, 8000)
+        page.wait_for_timeout(500)
+
+        html = page.content()
+        links = extract_links(html)
+
+        print(f"[scroll] step={i} links={len(links)}")
+
+        if len(links) == last_count:
+            print("[scroll] остановка — больше не грузится")
+            break
+
+        last_count = len(links)
 
 
 def main():
@@ -96,12 +108,14 @@ def main():
         page = browser.new_page()
 
         page.goto(START_URL)
-        scroll(page)
+
+        # 🔥 ключ — доскролл до конца
+        scroll_full(page)
 
         html = page.content()
         links = extract_links(html)
 
-        print(f"[helix] links: {len(links)}")
+        print(f"[helix] TOTAL LINKS: {len(links)}")
 
         rows = []
         for i, url in enumerate(links, 1):
