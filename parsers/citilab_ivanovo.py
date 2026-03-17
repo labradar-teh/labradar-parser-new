@@ -1,7 +1,7 @@
 import re
 import time
 import os
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import requests
@@ -9,45 +9,43 @@ from bs4 import BeautifulSoup
 
 
 CITY = "Иваново"
-LAB = "Citilab"
+LAB = "citilab"
 START_URL = "https://citilab.ru/ivanovo/catalog/"
 OUTPUT_FILE = "out/citilab_ivanovo.csv"
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/145.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    "User-Agent": "Mozilla/5.0"
 }
 
 
-def fetch(url: str):
+def fetch(url):
     try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
+        r = requests.get(url, headers=HEADERS, timeout=20)
         if r.status_code == 200:
             return BeautifulSoup(r.text, "html.parser")
-    except Exception:
+    except:
         return None
     return None
 
 
-def clean_text(s: str) -> str:
+def clean(s):
     return re.sub(r"\s+", " ", (s or "")).strip()
 
 
-def extract_price(text: str):
-    matches = re.findall(r"(\d[\d ]{0,12})\s*(?:₽|руб)", text, flags=re.I)
-    nums = []
-    for m in matches:
-        v = re.sub(r"[^\d]", "", m)
-        if v:
-            nums.append(int(v))
-    return nums[-1] if nums else None
+def extract_price(text):
+    m = re.search(r"(\d[\d\s]+)\s*(?:₽|руб)", text)
+    if m:
+        return int(re.sub(r"\D", "", m.group(1)))
+    return None
 
 
-def parse_page(url: str, category: str):
+def is_valid_catalog(url):
+    path = urlparse(url).path
+    return path.startswith("/ivanovo/catalog/") and path.count("/") < 6
+    # 🔥 ограничение глубины — убирает цикл
+
+
+def parse_page(url, category):
     soup = fetch(url)
     if not soup:
         return [], []
@@ -55,67 +53,33 @@ def parse_page(url: str, category: str):
     rows = []
     next_links = []
 
-    cards = soup.select("article, li, .catalog-item, .analysis-card, .card, .item")
+    cards = soup.select("a[href*='/catalog/']")
 
-    for card in cards:
-        name = ""
-        for sel in [
-            "h1",
-            "h2",
-            "h3",
-            "[class*='title']",
-            "[class*='name']",
-            "a[href]",
-        ]:
-            node = card.select_one(sel)
-            if node:
-                name = clean_text(node.get_text(" ", strip=True))
-                if name and len(name) > 3:
-                    break
+    for a in cards:
+        href = urljoin(url, a.get("href"))
 
-        if not name or len(name) < 4:
+        if not is_valid_catalog(href):
             continue
 
-        price = None
-        for sel in [
-            "[class*='price']",
-            ".price",
-            "[class*='cost']",
-            "[data-price]",
-        ]:
-            node = card.select_one(sel)
-            if node:
-                price = extract_price(clean_text(node.get_text(" ", strip=True)))
-                if price is not None:
-                    break
+        text = clean(a.get_text())
 
-        if price is None:
-            price = extract_price(clean_text(card.get_text(" ", strip=True)))
+        # если это анализ (есть цена)
+        parent = a.parent
+        full_text = clean(parent.get_text())
 
-        if price is None:
-            continue
+        price = extract_price(full_text)
 
-        link_node = card.select_one("a[href]")
-        link = urljoin(url, link_node.get("href")) if link_node and link_node.get("href") else url
-
-        rows.append({
-            "lab": LAB,
-            "city": CITY,
-            "category": category,
-            "analysis_name": name,
-            "price": price,
-            "url": link,
-        })
-
-    for a in soup.select("a[href]"):
-        href = a.get("href")
-        text = clean_text(a.get_text(" ", strip=True))
-        full = urljoin(url, href) if href else ""
-
-        if "/ivanovo/catalog/" not in full:
-            continue
-
-        next_links.append((full, text or category))
+        if price:
+            rows.append({
+                "lab": LAB,
+                "city": CITY,
+                "category": category,
+                "analysis_name": text,
+                "price": price,
+                "url": href
+            })
+        else:
+            next_links.append((href, text or category))
 
     return rows, next_links
 
@@ -133,7 +97,7 @@ def main():
         visited.add(url)
 
         rows, links = parse_page(url, category)
-        print(f"{url}: {len(rows)}")
+        print(f"{url}: rows={len(rows)} queue={len(queue)}")
 
         all_rows.extend(rows)
 
@@ -141,27 +105,25 @@ def main():
             if link_url not in visited:
                 queue.append((link_url, link_category))
 
-        time.sleep(0.5)
+        # 🔥 ускорение
+        time.sleep(0.1)
+
+        # 🔥 защита от бесконечного цикла
+        if len(visited) > 1500:
+            print("STOP: too many pages")
+            break
 
     os.makedirs("out", exist_ok=True)
 
     df = pd.DataFrame(all_rows)
 
-    if df.empty:
-        df = pd.DataFrame(columns=["lab", "city", "category", "analysis_name", "price", "url"])
-        df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
-        print(f"Saved empty file: {OUTPUT_FILE}")
-        return
-
-    df["analysis_name"] = df["analysis_name"].astype(str).str.strip()
-    df["category"] = df["category"].astype(str).str.strip()
-    df = df[df["analysis_name"].str.len() > 2].copy()
-    df = df.drop_duplicates(subset=["lab", "city", "category", "analysis_name", "price"]).copy()
-    df = df.sort_values(["category", "analysis_name"]).reset_index(drop=True)
+    df = df.drop_duplicates(subset=["analysis_name", "price"])
+    df = df.sort_values(["category", "analysis_name"])
 
     df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
-    print(f"Saved: {OUTPUT_FILE}")
+
     print(f"Rows: {len(df)}")
+    print(f"Saved: {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
