@@ -1,152 +1,174 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import csv
 import re
 import time
-import os
-from urllib.parse import urljoin
-
-import pandas as pd
 import requests
+import pandas as pd
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+from pathlib import Path
 
-
+LAB = "gemotest"
 CITY = "Иваново"
-LAB = "Gemotest"
-START_URL = "https://gemotest.ru/ivanovo/catalog/"
-OUTPUT_FILE = "out/gemotest_ivanovo.csv"
+BASE_URL = "https://gemotest.ru"
+START_URL = f"{BASE_URL}/ivanovo/analyzes/"
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/145.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    "User-Agent": "Mozilla/5.0"
 }
 
+DELAY = 0.2
 
-def fetch(url: str):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        if r.status_code == 200:
-            return BeautifulSoup(r.text, "html.parser")
-    except Exception:
+
+# ------------------------
+# utils
+# ------------------------
+def get_soup(url):
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    return BeautifulSoup(r.text, "lxml")
+
+
+def clean_text(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def parse_price(text):
+    if not text:
         return None
-    return None
+    text = text.replace("\xa0", " ")
+    m = re.search(r"([\d\s]+)\s*₽", text)
+    if not m:
+        return None
+    return int(re.sub(r"\D", "", m.group(1)))
 
 
-def clean_text(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "")).strip()
+# ------------------------
+# сбор ссылок
+# ------------------------
+def collect_analysis_links():
+    print("[gemotest] collecting links...")
+
+    soup = get_soup(START_URL)
+
+    links = set()
+
+    # ссылки на категории
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+
+        if "/analyzes/" in href and not href.endswith("/analyzes/"):
+            full = urljoin(BASE_URL, href)
+            links.add(full)
+
+    print(f"[gemotest] found category links: {len(links)}")
+
+    analysis_links = set()
+
+    # идем по категориям
+    for url in links:
+        try:
+            soup = get_soup(url)
+
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+
+                # ссылка на анализ
+                if re.search(r"/analyzes/.+/.+/", href):
+                    full = urljoin(BASE_URL, href)
+                    analysis_links.add(full)
+
+            time.sleep(DELAY)
+
+        except Exception as e:
+            print(f"[error] {url}: {e}")
+
+    print(f"[gemotest] total analysis links: {len(analysis_links)}")
+
+    return list(analysis_links)
 
 
-def extract_price(text: str):
-    matches = re.findall(r"(\d[\d ]{0,12})\s*(?:₽|руб)", text, flags=re.I)
-    nums = []
-    for m in matches:
-        v = re.sub(r"[^\d]", "", m)
-        if v:
-            nums.append(int(v))
-    return nums[-1] if nums else None
+# ------------------------
+# парсинг страницы анализа
+# ------------------------
+def parse_analysis(url):
+    soup = get_soup(url)
+
+    # название
+    h1 = soup.find("h1")
+    if not h1:
+        return None
+
+    name = clean_text(h1.get_text())
+
+    # цена — ищем ВЕСЬ текст страницы
+    full_text = clean_text(soup.get_text(" "))
+
+    price = parse_price(full_text)
+
+    # категория
+    category = None
+    breadcrumbs = soup.select("nav a")
+    if breadcrumbs:
+        category = clean_text(breadcrumbs[-2].get_text())
+
+    return {
+        "lab": LAB,
+        "city": CITY,
+        "category": category,
+        "analysis_name": name,
+        "price": price,
+        "url": url
+    }
 
 
-def parse_page(url: str, category: str):
-    soup = fetch(url)
-    if not soup:
-        return [], []
+# ------------------------
+# main
+# ------------------------
+def main():
+    outdir = Path("output")
+    outdir.mkdir(exist_ok=True)
+
+    links = collect_analysis_links()
 
     rows = []
-    next_links = []
 
-    cards = soup.select("article, li, .catalog-item, .analysis-card, .card")
+    for i, url in enumerate(links, 1):
+        try:
+            data = parse_analysis(url)
 
-    for card in cards:
-        name = ""
-        for sel in ["h3", "h2", "[class*='title']", "a[href]"]:
-            node = card.select_one(sel)
-            if node:
-                name = clean_text(node.get_text(" ", strip=True))
-                if name:
-                    break
+            if not data or not data["price"]:
+                continue
 
-        if not name or len(name) < 4:
-            continue
+            rows.append(data)
 
-        price = None
-        for sel in ["[class*='price']", ".price"]:
-            node = card.select_one(sel)
-            if node:
-                price = extract_price(clean_text(node.get_text(" ", strip=True)))
-                if price is not None:
-                    break
+            if i % 100 == 0:
+                print(f"[gemotest] {i}/{len(links)}")
 
-        if price is None:
-            price = extract_price(clean_text(card.get_text(" ", strip=True)))
+            time.sleep(DELAY)
 
-        if price is None:
-            continue
+        except Exception as e:
+            print(f"[error] {url}: {e}")
 
-        link_node = card.select_one("a[href]")
-        link = urljoin(url, link_node.get("href")) if link_node and link_node.get("href") else url
+    # дедуп
+    unique = {}
+    for r in rows:
+        key = (r["analysis_name"], r["price"])
+        unique[key] = r
 
-        rows.append({
-            "lab": LAB,
-            "city": CITY,
-            "category": category,
-            "analysis_name": name,
-            "price": price,
-            "url": link,
-        })
+    rows = list(unique.values())
 
-    for a in soup.select("a[href]"):
-        href = a.get("href")
-        text = clean_text(a.get_text(" ", strip=True))
-        full = urljoin(url, href) if href else ""
+    df = pd.DataFrame(rows)
 
-        if "/ivanovo/catalog/" not in full:
-            continue
-        if any(x in full for x in ["/aktsii/", "/sale/", "/news/", "/articles/"]):
-            continue
+    csv_path = outdir / "gemotest_ivanovo.csv"
+    xlsx_path = outdir / "gemotest_ivanovo.xlsx"
 
-        next_links.append((full, text or category))
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+    df.to_excel(xlsx_path, index=False)
 
-    return rows, next_links
-
-
-def main():
-    visited = set()
-    queue = [(START_URL, "Каталог")]
-    all_rows = []
-
-    while queue:
-        url, category = queue.pop(0)
-
-        if url in visited:
-            continue
-        visited.add(url)
-
-        rows, links = parse_page(url, category)
-        print(f"{url}: {len(rows)}")
-
-        all_rows.extend(rows)
-
-        for link_url, link_category in links:
-            if link_url not in visited:
-                queue.append((link_url, link_category))
-
-        time.sleep(0.5)
-
-    df = pd.DataFrame(all_rows)
-    if df.empty:
-        raise RuntimeError("Нет данных для сохранения")
-
-    df["analysis_name"] = df["analysis_name"].astype(str).str.strip()
-    df["category"] = df["category"].astype(str).str.strip()
-    df = df[df["analysis_name"].str.len() > 2].copy()
-    df = df.drop_duplicates(subset=["lab", "city", "category", "analysis_name", "price"]).copy()
-    df = df.sort_values(["category", "analysis_name"]).reset_index(drop=True)
-
-    os.makedirs("out", exist_ok=True)
-    df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
-    print(f"Saved: {OUTPUT_FILE}")
-    print(f"Rows: {len(df)}")
+    print(f"[gemotest] DONE: {len(rows)} rows")
 
 
 if __name__ == "__main__":
