@@ -33,3 +33,9 @@ jobs:
         with:
           name: helix-ivanovo-csv
           path: out/helix_ivanovo.csv
+
+      - name: Upload XLSX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helix-ivanovo-xlsx
+          path: out/helix_ivanovo.xlsx
