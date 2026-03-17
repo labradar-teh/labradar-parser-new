@@ -2,13 +2,16 @@ name: Helix Ivanovo Parser
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "15 3 * * 1"
 
 jobs:
-  helix:
+  parse-helix-ivanovo:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -19,23 +22,42 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r parsers/requirements.txt
+          pip install requests beautifulsoup4 pandas openpyxl lxml
 
-      - name: Create output folder
-        run: mkdir -p out
+      - name: Create output directory
+        run: mkdir -p output
 
       - name: Run Helix parser
         run: |
-          python parsers/helix_ivanovo.py
+          python parsers/helix_ivanovo.py --outdir output
+
+      - name: Show output files
+        run: |
+          ls -lah output
+          echo "CSV preview:"
+          python - << 'PY'
+          import pandas as pd
+          from pathlib import Path
+
+          csv_file = Path("output/helix_ivanovo.csv")
+          if csv_file.exists():
+              df = pd.read_csv(csv_file)
+              print(df.head(20).to_string(index=False))
+              print(f"\nRows: {len(df)}")
+          else:
+              print("CSV not found")
+          PY
 
       - name: Upload CSV artifact
         uses: actions/upload-artifact@v4
         with:
           name: helix-ivanovo-csv
-          path: out/helix_ivanovo.csv
+          path: output/helix_ivanovo.csv
+          if-no-files-found: error
 
       - name: Upload XLSX artifact
         uses: actions/upload-artifact@v4
         with:
           name: helix-ivanovo-xlsx
-          path: out/helix_ivanovo.xlsx
+          path: output/helix_ivanovo.xlsx
+          if-no-files-found: error
