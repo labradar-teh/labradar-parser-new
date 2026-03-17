@@ -2,6 +2,8 @@ name: Invitro Ivanovo Parser
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "25 3 * * 1"
 
 jobs:
   invitro:
@@ -20,33 +22,33 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 pandas openpyxl lxml urllib3
+          pip install requests pandas openpyxl beautifulsoup4 lxml urllib3
 
       - name: Prepare folders
         run: |
-          mkdir -p out
           mkdir -p output
+          mkdir -p out
 
       - name: Run Invitro parser
         run: |
           set -euxo pipefail
-          python parsers/invitro_ivanovo.py
+          python parsers/invitro_ivanovo.py --outdir output
 
       - name: Debug output
         if: always()
         run: |
-          echo "=== out ==="
-          ls -lah out || true
           echo "=== output ==="
           ls -lah output || true
+          echo "=== out ==="
+          ls -lah out || true
 
           python - << 'PY'
           from pathlib import Path
           import pandas as pd
 
           candidates = [
-              Path("out/invitro_ivanovo.csv"),
               Path("output/invitro_ivanovo.csv"),
+              Path("out/invitro_ivanovo.csv"),
           ]
 
           found = False
@@ -59,6 +61,8 @@ jobs:
                       print(f"Rows: {len(df)}")
                       if len(df) > 0:
                           print(df.head(20).to_string(index=False))
+                          print("Unique URLs:", df["url"].nunique() if "url" in df.columns else "no url column")
+                          print("Filled prices:", df["price"].replace('', pd.NA).notna().sum() if "price" in df.columns else "no price column")
                   except Exception as e:
                       print(f"CSV read error: {e}")
 
@@ -72,8 +76,8 @@ jobs:
         with:
           name: invitro-ivanovo-csv
           path: |
-            out/invitro_ivanovo.csv
             output/invitro_ivanovo.csv
+            out/invitro_ivanovo.csv
           if-no-files-found: error
 
       - name: Upload XLSX artifact
@@ -82,6 +86,6 @@ jobs:
         with:
           name: invitro-ivanovo-xlsx
           path: |
-            out/invitro_ivanovo.xlsx
             output/invitro_ivanovo.xlsx
+            out/invitro_ivanovo.xlsx
           if-no-files-found: ignore
