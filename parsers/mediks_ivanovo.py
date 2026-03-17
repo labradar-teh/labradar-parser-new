@@ -1,36 +1,18 @@
+import os
 import re
 import time
-import os
 from urllib.parse import urljoin
 
 import pandas as pd
-import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 
 CITY = "Иваново"
 LAB = "Медикс Лаб"
 START_URL = "https://medikslab.ru/ivanovo/analizy/uslugi"
 OUTPUT_FILE = "out/mediks_ivanovo.csv"
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/145.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-}
-
-
-def fetch(url: str):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        if r.status_code == 200:
-            return BeautifulSoup(r.text, "html.parser")
-    except Exception:
-        return None
-    return None
+DEBUG_HTML = "out/mediks_debug.html"
 
 
 def clean_text(s: str) -> str:
@@ -47,22 +29,20 @@ def extract_price(text: str):
     return nums[-1] if nums else None
 
 
-def parse_page(url: str, category: str):
-    soup = fetch(url)
-    if not soup:
-        return [], []
-
+def parse_page_html(html: str, page_url: str, category: str):
+    soup = BeautifulSoup(html, "html.parser")
     rows = []
     next_links = []
 
-    cards = soup.select("article, li, .catalog-item, .service-item, .product, .item")
+    cards = soup.select(
+        "article, li, .catalog-item, .service-item, .product, .item, "
+        "[class*='service'], [class*='catalog']"
+    )
 
     for card in cards:
         name = ""
         for sel in [
-            "h1",
-            "h2",
-            "h3",
+            "h1", "h2", "h3",
             "[class*='title']",
             "[class*='name']",
             "a[href]",
@@ -70,10 +50,10 @@ def parse_page(url: str, category: str):
             node = card.select_one(sel)
             if node:
                 name = clean_text(node.get_text(" ", strip=True))
-                if name and len(name) > 3:
+                if len(name) > 3:
                     break
 
-        if not name or len(name) < 4:
+        if len(name) < 4:
             continue
 
         price = None
@@ -96,7 +76,7 @@ def parse_page(url: str, category: str):
             continue
 
         link_node = card.select_one("a[href]")
-        link = urljoin(url, link_node.get("href")) if link_node and link_node.get("href") else url
+        link = urljoin(page_url, link_node.get("href")) if link_node and link_node.get("href") else page_url
 
         rows.append({
             "lab": LAB,
@@ -110,7 +90,7 @@ def parse_page(url: str, category: str):
     for a in soup.select("a[href]"):
         href = a.get("href")
         text = clean_text(a.get_text(" ", strip=True))
-        full = urljoin(url, href) if href else ""
+        full = urljoin(page_url, href) if href else ""
 
         if "/ivanovo/analizy" not in full:
             continue
@@ -121,29 +101,52 @@ def parse_page(url: str, category: str):
 
 
 def main():
+    os.makedirs("out", exist_ok=True)
     visited = set()
     queue = [(START_URL, "Каталог")]
     all_rows = []
 
-    while queue:
-        url, category = queue.pop(0)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
 
-        if url in visited:
-            continue
-        visited.add(url)
+        first = True
 
-        rows, links = parse_page(url, category)
-        print(f"{url}: {len(rows)}")
+        while queue:
+            url, category = queue.pop(0)
 
-        all_rows.extend(rows)
+            if url in visited:
+                continue
+            visited.add(url)
 
-        for link_url, link_category in links:
-            if link_url not in visited:
-                queue.append((link_url, link_category))
+            print(f"Open: {url}")
 
-        time.sleep(0.5)
+            try:
+                page.goto(url, wait_until="networkidle", timeout=90000)
+                page.wait_for_timeout(3500)
+            except Exception as e:
+                print(f"Open failed: {e}")
+                continue
 
-    os.makedirs("out", exist_ok=True)
+            html = page.content()
+
+            if first:
+                with open(DEBUG_HTML, "w", encoding="utf-8") as f:
+                    f.write(html)
+                first = False
+
+            rows, links = parse_page_html(html, url, category)
+            print(f"{url}: {len(rows)}")
+
+            all_rows.extend(rows)
+
+            for link_url, link_category in links:
+                if link_url not in visited:
+                    queue.append((link_url, link_category))
+
+            time.sleep(1)
+
+        browser.close()
 
     df = pd.DataFrame(all_rows)
 
