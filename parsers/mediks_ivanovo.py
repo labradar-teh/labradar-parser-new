@@ -4,22 +4,39 @@ import time
 from urllib.parse import urljoin
 
 import pandas as pd
+import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 
 
 CITY = "Иваново"
 LAB = "Медикс Лаб"
 START_URL = "https://medikslab.ru/ivanovo/analizy/uslugi"
 OUTPUT_FILE = "out/mediks_ivanovo.csv"
-DEBUG_HTML = "out/mediks_debug.html"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/145.0.0.0 Safari/537.36"
+    )
+}
 
 
-def clean_text(s: str) -> str:
+def fetch(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        if r.status_code == 200:
+            return r.text
+    except:
+        return ""
+    return ""
+
+
+def clean_text(s):
     return re.sub(r"\s+", " ", (s or "")).strip()
 
 
-def extract_price(text: str):
+def extract_price(text):
     matches = re.findall(r"(\d[\d ]{0,12})\s*(?:₽|руб)", text, flags=re.I)
     nums = []
     for m in matches:
@@ -29,142 +46,76 @@ def extract_price(text: str):
     return nums[-1] if nums else None
 
 
-def parse_page_html(html: str, page_url: str, category: str):
+def parse_text(html, url):
     soup = BeautifulSoup(html, "html.parser")
     rows = []
-    next_links = []
 
-    cards = soup.select(
-        "article, li, .catalog-item, .service-item, .product, .item, "
-        "[class*='service'], [class*='catalog']"
-    )
+    for a in soup.select("a"):
+        text = clean_text(a.get_text(" ", strip=True))
 
-    for card in cards:
-        name = ""
-        for sel in [
-            "h1", "h2", "h3",
-            "[class*='title']",
-            "[class*='name']",
-            "a[href]",
-        ]:
-            node = card.select_one(sel)
-            if node:
-                name = clean_text(node.get_text(" ", strip=True))
-                if len(name) > 3:
-                    break
+        if not text:
+            continue
+
+        if "₽" not in text and "руб" not in text.lower():
+            continue
+
+        price = extract_price(text)
+        if price is None:
+            continue
+
+        # убираем цену из текста
+        name = re.sub(r"\d[\d ]{0,12}\s*(?:₽|руб)", "", text, flags=re.I)
+        name = clean_text(name)
 
         if len(name) < 4:
             continue
 
-        price = None
-        for sel in [
-            "[class*='price']",
-            ".price",
-            "[class*='cost']",
-            "[data-price]",
-        ]:
-            node = card.select_one(sel)
-            if node:
-                price = extract_price(clean_text(node.get_text(" ", strip=True)))
-                if price is not None:
-                    break
-
-        if price is None:
-            price = extract_price(clean_text(card.get_text(" ", strip=True)))
-
-        if price is None:
-            continue
-
-        link_node = card.select_one("a[href]")
-        link = urljoin(page_url, link_node.get("href")) if link_node and link_node.get("href") else page_url
+        link = a.get("href")
+        full_link = urljoin(url, link) if link else url
 
         rows.append({
             "lab": LAB,
             "city": CITY,
-            "category": category,
+            "category": "Анализы",
             "analysis_name": name,
             "price": price,
-            "url": link,
+            "url": full_link,
         })
 
-    for a in soup.select("a[href]"):
-        href = a.get("href")
-        text = clean_text(a.get_text(" ", strip=True))
-        full = urljoin(page_url, href) if href else ""
-
-        if "/ivanovo/analizy" not in full:
-            continue
-
-        next_links.append((full, text or category))
-
-    return rows, next_links
+    return rows
 
 
 def main():
-    os.makedirs("out", exist_ok=True)
-    visited = set()
-    queue = [(START_URL, "Каталог")]
     all_rows = []
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+    for page in range(1, 40):
+        url = START_URL if page == 1 else f"{START_URL}?PAGEN_1={page}"
+        html = fetch(url)
 
-        first = True
+        rows = parse_text(html, url)
+        print(f"page {page}: {len(rows)}")
 
-        while queue:
-            url, category = queue.pop(0)
+        if not rows and page > 5:
+            break
 
-            if url in visited:
-                continue
-            visited.add(url)
+        all_rows.extend(rows)
+        time.sleep(0.5)
 
-            print(f"Open: {url}")
-
-            try:
-                page.goto(url, wait_until="networkidle", timeout=90000)
-                page.wait_for_timeout(3500)
-            except Exception as e:
-                print(f"Open failed: {e}")
-                continue
-
-            html = page.content()
-
-            if first:
-                with open(DEBUG_HTML, "w", encoding="utf-8") as f:
-                    f.write(html)
-                first = False
-
-            rows, links = parse_page_html(html, url, category)
-            print(f"{url}: {len(rows)}")
-
-            all_rows.extend(rows)
-
-            for link_url, link_category in links:
-                if link_url not in visited:
-                    queue.append((link_url, link_category))
-
-            time.sleep(1)
-
-        browser.close()
+    os.makedirs("out", exist_ok=True)
 
     df = pd.DataFrame(all_rows)
 
     if df.empty:
         df = pd.DataFrame(columns=["lab", "city", "category", "analysis_name", "price", "url"])
-        df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
-        print(f"Saved empty file: {OUTPUT_FILE}")
+        df.to_csv(OUTPUT_FILE, index=False)
+        print("EMPTY RESULT")
         return
 
-    df["analysis_name"] = df["analysis_name"].astype(str).str.strip()
-    df["category"] = df["category"].astype(str).str.strip()
-    df = df[df["analysis_name"].str.len() > 2].copy()
-    df = df.drop_duplicates(subset=["lab", "city", "category", "analysis_name", "price"]).copy()
-    df = df.sort_values(["category", "analysis_name"]).reset_index(drop=True)
+    df = df.drop_duplicates(subset=["analysis_name", "price"])
+    df = df.sort_values("analysis_name").reset_index(drop=True)
 
     df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
-    print(f"Saved: {OUTPUT_FILE}")
-    print(f"Rows: {len(df)}")
+    print(f"Saved: {len(df)} rows")
 
 
 if __name__ == "__main__":
