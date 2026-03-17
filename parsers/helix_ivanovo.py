@@ -1,36 +1,18 @@
+import os
 import re
 import time
-import os
 from urllib.parse import urljoin
 
 import pandas as pd
-import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 
 CITY = "Иваново"
 LAB = "Helix"
 BASE_URL = "https://helix.ru/ivanovo/catalog/190-vse-analizy"
 OUTPUT_FILE = "out/helix_ivanovo.csv"
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/145.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-}
-
-
-def fetch(url: str):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        if r.status_code == 200:
-            return BeautifulSoup(r.text, "html.parser")
-    except Exception:
-        return None
-    return None
+DEBUG_HTML = "out/helix_debug.html"
 
 
 def clean_text(s: str) -> str:
@@ -47,22 +29,19 @@ def extract_price(text: str):
     return nums[-1] if nums else None
 
 
-def parse_page(url: str):
-    soup = fetch(url)
-    if not soup:
-        return []
-
+def parse_html(html: str, page_url: str):
+    soup = BeautifulSoup(html, "html.parser")
     rows = []
 
-    # Более мягкий набор селекторов
-    cards = soup.select("article, li, .catalog-item, .analysis-card, .service-card, .product-card, .item")
+    cards = soup.select(
+        "article, li, .catalog-item, .analysis-card, .service-card, "
+        ".product-card, .item, [class*='catalog'], [class*='product']"
+    )
 
     for card in cards:
         name = ""
         for sel in [
-            "h1",
-            "h2",
-            "h3",
+            "h1", "h2", "h3",
             "[class*='title']",
             "[class*='name']",
             "a[href]",
@@ -70,10 +49,10 @@ def parse_page(url: str):
             node = card.select_one(sel)
             if node:
                 name = clean_text(node.get_text(" ", strip=True))
-                if name and len(name) > 3:
+                if len(name) > 3:
                     break
 
-        if not name or len(name) < 4:
+        if len(name) < 4:
             continue
 
         price = None
@@ -96,7 +75,7 @@ def parse_page(url: str):
             continue
 
         link_node = card.select_one("a[href]")
-        link = urljoin(url, link_node.get("href")) if link_node and link_node.get("href") else url
+        link = urljoin(page_url, link_node.get("href")) if link_node and link_node.get("href") else page_url
 
         rows.append({
             "lab": LAB,
@@ -111,24 +90,45 @@ def parse_page(url: str):
 
 
 def main():
+    os.makedirs("out", exist_ok=True)
     all_rows = []
 
-    for page in range(1, 90):
-        url = BASE_URL if page == 1 else f"{BASE_URL}?page={page}"
-        rows = parse_page(url)
-        print(f"page {page}: {len(rows)}")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
 
-        if not rows and page > 5:
-            break
+        for page_num in range(1, 90):
+            url = BASE_URL if page_num == 1 else f"{BASE_URL}?page={page_num}"
+            print(f"Open: {url}")
 
-        all_rows.extend(rows)
-        time.sleep(0.5)
+            try:
+                page.goto(url, wait_until="networkidle", timeout=90000)
+                page.wait_for_timeout(4000)
+            except Exception as e:
+                print(f"Open failed: {e}")
+                if page_num > 3:
+                    break
+                continue
 
-    os.makedirs("out", exist_ok=True)
+            html = page.content()
+
+            if page_num == 1:
+                with open(DEBUG_HTML, "w", encoding="utf-8") as f:
+                    f.write(html)
+
+            rows = parse_html(html, url)
+            print(f"page {page_num}: {len(rows)}")
+
+            if not rows and page_num > 5:
+                break
+
+            all_rows.extend(rows)
+            time.sleep(1)
+
+        browser.close()
 
     df = pd.DataFrame(all_rows)
 
-    # Не падаем, даже если пусто
     if df.empty:
         df = pd.DataFrame(columns=["lab", "city", "category", "analysis_name", "price", "url"])
         df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
