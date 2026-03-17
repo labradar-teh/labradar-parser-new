@@ -2,92 +2,49 @@ name: Helix Ivanovo Parser
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "15 3 * * 1"
 
 jobs:
-  parse-helix-ivanovo:
+  helix:
     runs-on: ubuntu-latest
     timeout-minutes: 240
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
-          python -m pip install --upgrade pip
           pip install pandas openpyxl beautifulsoup4 lxml playwright
 
-      - name: Install Playwright browser
+      - name: Install browser
         run: |
-          python -m playwright install --with-deps chromium
+          python -m playwright install chromium
 
-      - name: Prepare folders
+      - name: Run parser
         run: |
-          mkdir -p output
-          mkdir -p out
-
-      - name: Run Helix parser
-        run: |
-          set -euxo pipefail
           python parsers/helix_ivanovo.py --outdir output
 
-      - name: Debug output
-        if: always()
+      - name: Debug
         run: |
-          echo "=== output ==="
           ls -lah output || true
-          echo "=== out ==="
-          ls -lah out || true
 
           python - << 'PY'
-          from pathlib import Path
           import pandas as pd
+          from pathlib import Path
 
-          candidates = [
-              Path("output/helix_ivanovo.csv"),
-              Path("out/helix_ivanovo.csv"),
-          ]
-
-          found = False
-          for csv_file in candidates:
-              if csv_file.exists():
-                  found = True
-                  print(f"FOUND: {csv_file}")
-                  try:
-                      df = pd.read_csv(csv_file)
-                      print(f"Rows: {len(df)}")
-                      if len(df) > 0:
-                          print(df.head(20).to_string(index=False))
-                  except Exception as e:
-                      print(f"CSV read error: {e}")
-
-          if not found:
-              print("No helix CSV found")
+          p = Path("output/helix_ivanovo.csv")
+          if p.exists():
+              df = pd.read_csv(p)
+              print("Rows:", len(df))
+              print(df.head(20))
+          else:
+              print("NO FILE")
           PY
 
-      - name: Upload CSV artifact
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: helix-ivanovo-csv
-          path: |
-            output/helix_ivanovo.csv
-            out/helix_ivanovo.csv
-          if-no-files-found: error
-
-      - name: Upload XLSX artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: helix-ivanovo-xlsx
-          path: |
-            output/helix_ivanovo.xlsx
-            out/helix_ivanovo.xlsx
-          if-no-files-found: ignore
+          name: helix
+          path: output/*
