@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 pandas openpyxl lxml playwright
+          pip install requests beautifulsoup4 pandas openpyxl lxml playwright urllib3
 
       - name: Install Playwright browser
         run: |
@@ -33,15 +33,10 @@ jobs:
           mkdir -p output
           mkdir -p out
 
-      - name: Show parser file
-        run: |
-          ls -lah parsers
-          python --version
-
       - name: Run Kislorod parser
         run: |
           set -euxo pipefail
-          python parsers/kislorod_ivanovo.py || true
+          python parsers/kislorod_ivanovo.py
 
       - name: Debug output
         if: always()
