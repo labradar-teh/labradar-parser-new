@@ -22,7 +22,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 pandas openpyxl lxml urllib3
+          pip install pandas openpyxl beautifulsoup4 lxml playwright
+
+      - name: Install Playwright browser
+        run: |
+          python -m playwright install --with-deps chromium
 
       - name: Prepare folders
         run: |
@@ -61,8 +65,6 @@ jobs:
                       print(f"Rows: {len(df)}")
                       if len(df) > 0:
                           print(df.head(20).to_string(index=False))
-                          print("Unique URLs:", df["url"].nunique())
-                          print("Unique names:", df["analysis_name"].nunique())
                   except Exception as e:
                       print(f"CSV read error: {e}")
 
