@@ -27,13 +27,19 @@ jobs:
       - name: Prepare output dir
         run: mkdir -p output
 
+      - name: Syntax check
+        run: python -m py_compile parser_kislorod.py
+
       - name: Run parser
         run: python parser_kislorod.py
 
       - name: Show output files
+        if: always()
         run: |
+          pwd
           ls -lah
           ls -lah output || true
+          wc -l output/kislorod_ivanovo.csv || true
 
       - name: Upload CSV
         if: always()
@@ -41,7 +47,7 @@ jobs:
         with:
           name: kislorod-ivanovo-csv
           path: output/kislorod_ivanovo.csv
-          if-no-files-found: ignore
+          if-no-files-found: error
 
       - name: Upload XLSX
         if: always()
@@ -49,4 +55,4 @@ jobs:
         with:
           name: kislorod-ivanovo-xlsx
           path: output/kislorod_ivanovo.xlsx
-          if-no-files-found: ignore
+          if-no-files-found: error
