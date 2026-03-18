@@ -27,11 +27,14 @@ jobs:
       - name: Prepare output dir
         run: mkdir -p output
 
-      - name: Debug files
+      - name: Check files
         run: |
           pwd
           ls -lah
           find . -maxdepth 3 -type f | sort
+
+      - name: Syntax check
+        run: python -m py_compile parser_helix.py
 
       - name: Run parser
         run: python parser_helix.py
@@ -41,6 +44,7 @@ jobs:
         run: |
           ls -lah
           ls -lah output || true
+          wc -l output/helix_ivanovo.csv || true
 
       - name: Upload CSV
         if: always()
@@ -48,7 +52,7 @@ jobs:
         with:
           name: helix-ivanovo-csv
           path: output/helix_ivanovo.csv
-          if-no-files-found: ignore
+          if-no-files-found: error
 
       - name: Upload XLSX
         if: always()
@@ -56,4 +60,4 @@ jobs:
         with:
           name: helix-ivanovo-xlsx
           path: output/helix_ivanovo.xlsx
-          if-no-files-found: ignore
+          if-no-files-found: error
