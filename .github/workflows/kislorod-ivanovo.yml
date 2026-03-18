@@ -1,6 +1,4 @@
-# .github/workflows/kislorod-ivanovo.yml
-
-name: Kislorod Ivanovo Parser
+name: kislorod-ivanovo
 
 on:
   workflow_dispatch:
@@ -28,16 +26,16 @@ jobs:
         run: mkdir -p output
 
       - name: Syntax check
-        run: python -m py_compile parser_kislorod.py
+        run: python -m py_compile parsers/kislorod_ivanovo.py
 
       - name: Run parser
-        run: python parser_kislorod.py
+        run: python parsers/kislorod_ivanovo.py
 
       - name: Debug output
         if: always()
         run: |
-          pwd
           ls -lah
+          ls -lah parsers || true
           ls -lah output || true
           wc -l output/kislorod_ivanovo.csv || true
 
