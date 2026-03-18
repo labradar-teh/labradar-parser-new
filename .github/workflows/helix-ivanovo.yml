@@ -1,3 +1,5 @@
+# .github/workflows/helix-ivanovo.yml
+
 name: helix-ivanovo
 
 on:
@@ -6,7 +8,7 @@ on:
 jobs:
   helix:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -22,18 +24,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 openpyxl
 
-      - name: Run parser
+      - name: Prepare output dir
+        run: mkdir -p output
+
+      - name: Debug files
         run: |
-          python parser_helix.py
+          pwd
+          ls -lah
+          find . -maxdepth 3 -type f | sort
+
+      - name: Run parser
+        run: python parser_helix.py
+
+      - name: Show output
+        if: always()
+        run: |
+          ls -lah
+          ls -lah output || true
 
       - name: Upload CSV
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: helix-ivanovo-csv
-          path: helix-ivanovo.csv
+          path: output/helix_ivanovo.csv
+          if-no-files-found: ignore
 
       - name: Upload XLSX
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: helix-ivanovo-xlsx
-          path: helix-ivanovo.xlsx
+          path: output/helix_ivanovo.xlsx
+          if-no-files-found: ignore
