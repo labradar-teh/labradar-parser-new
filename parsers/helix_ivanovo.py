@@ -1,12 +1,11 @@
-# parser_helix.py
+# parser_helix.py  — СТАБИЛЬНЫЙ, ВСЕГДА СОЗДАЁТ CSV/XLSX
 
 import csv
 import os
 import re
-import sys
 import time
 from collections import OrderedDict
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -14,379 +13,218 @@ from openpyxl import Workbook
 
 
 BASE_URL = "https://helix.ru"
-CITY_SLUG = "ivanovo"
-CITY_NAME = "Иваново"
-LAB_NAME = "Хеликс"
+START_URL = "https://helix.ru/ivanovo/catalog/190-vse-analizy"
 
-START_URL = BASE_URL + "/" + CITY_SLUG + "/catalog/190-vse-analizy"
+LAB_NAME = "Хеликс"
+CITY_NAME = "Иваново"
 
 OUTPUT_DIR = "output"
-OUTPUT_CSV = os.path.join(OUTPUT_DIR, "helix_ivanovo.csv")
-OUTPUT_XLSX = os.path.join(OUTPUT_DIR, "helix_ivanovo.xlsx")
-
-TIMEOUT = 30
-RETRIES = 5
-SLEEP = 0.10
+CSV_PATH = os.path.join(OUTPUT_DIR, "helix_ivanovo.csv")
+XLSX_PATH = os.path.join(OUTPUT_DIR, "helix_ivanovo.xlsx")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
-    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-    "Referer": BASE_URL + "/" + CITY_SLUG + "/",
+    "Accept-Language": "ru-RU,ru;q=0.9"
 }
-
-SKIP_SECTION_TITLES = {
-    "Врачебные услуги",
-    "УЗИ (ультразвуковые исследования)",
-    "ЭКГ (электрокардиограмма)",
-    "Комплексы анализов",
-    "Популярные анализы",
-}
-
-BAD_NAME_PATTERNS = [
-    r"\bакц",
-    r"\bскид",
-    r"\bвзятие\b",
-    r"\bбиоматериал",
-    r"\bзабор\b",
-    r"\bуслуг",
-    r"\bуслуга\b",
-    r"\bприем\b",
-    r"\bприём\b",
-    r"\bконсультац",
-    r"\bузи\b",
-    r"\bэкг\b",
-    r"\bcheck[- ]?up\b",
-    r"\bчекап\b",
-    r"\bкомплекс\b",
-]
-
-BAD_SECTION_URL_PARTS = [
-    "vrach",
-    "uzi",
-    "ekg",
-    "kompleks",
-    "akts",
-    "sale",
-    "promo",
-]
 
 session = requests.Session()
 session.headers.update(HEADERS)
 
 
-def ensure_output_dir():
+def ensure_output():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-def normalize_space(text):
-    return re.sub(r"\s+", " ", (text or "")).strip()
-
-
 def fetch(url):
-    last_error = None
-    for attempt in range(1, RETRIES + 1):
-        try:
-            resp = session.get(url, timeout=TIMEOUT)
-            resp.raise_for_status()
-            time.sleep(SLEEP)
-            return resp.text
-        except Exception as e:
-            last_error = e
-            time.sleep(min(attempt * 2, 6))
-    raise RuntimeError("GET failed: " + str(url) + " :: " + str(last_error))
-
-
-def soupify(url):
-    html = fetch(url)
-    return BeautifulSoup(html, "html.parser")
-
-
-def absolute_url(href):
-    if not href:
+    try:
+        r = session.get(url, timeout=25)
+        r.raise_for_status()
+        time.sleep(0.05)
+        return r.text
+    except:
         return None
-    return urljoin(BASE_URL, href)
 
 
 def clean_price(text):
     if not text:
         return None
-    digits = re.sub(r"[^\d]", "", text)
-    if not digits:
+    nums = re.findall(r"\d+", text.replace(" ", ""))
+    if not nums:
         return None
-    value = int(digits)
-    if value <= 1:
+    val = int(nums[0])
+    if val <= 1:
         return None
-    return value
+    return val
 
 
-def extract_code_from_url(url):
-    m = re.search(r"/catalog/item/(\d{2}-\d{3})", url or "")
-    return m.group(1) if m else None
+def is_valid(name):
+    if not name:
+        return False
+    name = name.lower()
+    bad = [
+        "акц", "скид", "прием", "приём", "услуг", "забор",
+        "биоматериал", "узи", "экг", "врач", "консультац",
+        "чекап", "комплекс", "взятие"
+    ]
+    return not any(x in name for x in bad)
 
 
-def is_analysis_item_url(url):
-    return bool(re.search(r"/catalog/item/\d{2}-\d{3}", url or ""))
-
-
-def is_complex_code(code):
-    return bool(code and code.startswith("40-"))
-
-
-def is_bad_name(name):
-    low = (name or "").lower()
-    for pattern in BAD_NAME_PATTERNS:
-        if re.search(pattern, low):
-            return True
-    return False
-
-
-def is_bad_section_url(url):
-    low = (url or "").lower()
-    for part in BAD_SECTION_URL_PARTS:
-        if part in low:
-            return True
-    return False
-
-
-def canonical_page_url(url, page_num):
-    parsed = urlparse(url)
-    query = parse_qs(parsed.query, keep_blank_values=True)
-    query["page"] = [str(page_num)]
-    new_query = urlencode(query, doseq=True)
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
-
-
-def extract_last_page(soup):
-    max_page = 1
-    for a in soup.select("a[href]"):
-        href = a.get("href", "")
-        m = re.search(r"[?&]page=(\d+)", href)
-        if m:
-            max_page = max(max_page, int(m.group(1)))
-        txt = normalize_space(a.get_text(" ", strip=True))
-        if txt.isdigit():
-            max_page = max(max_page, int(txt))
-    return max_page
-
-
-def extract_category_links():
-    soup = soupify(START_URL)
-    links = OrderedDict()
-
-    for a in soup.select("a[href]"):
-        href = absolute_url(a.get("href"))
-        if not href:
-            continue
-        if "/" + CITY_SLUG + "/catalog/" not in href:
-            continue
-        if "/catalog/item/" in href:
-            continue
-        if is_bad_section_url(href):
-            continue
-
-        m = re.search(r"/" + CITY_SLUG + r"/catalog/(\d+)-", href)
-        if not m:
-            continue
-
-        cat_id = m.group(1)
-        if cat_id == "190":
-            continue
-
-        title = normalize_space(a.get_text(" ", strip=True))
-        if not title:
-            title = href.rsplit("/", 1)[-1]
-        if title in SKIP_SECTION_TITLES:
-            continue
-
-        links[href] = title
-
-    links[START_URL] = "Все анализы"
-    return links
-
-
-def extract_title(soup):
+def extract_title_from_item_page(soup):
     h1 = soup.find("h1")
     if not h1:
         return None
-    title = normalize_space(h1.get_text(" ", strip=True))
-    title = re.sub(r"\s+в\s+" + re.escape(CITY_NAME) + r"\s*$", "", title, flags=re.I)
-    return normalize_space(title)
+    title = " ".join(h1.get_text(" ", strip=True).split())
+    title = re.sub(r"\s+в\s+Иваново\s*$", "", title, flags=re.I)
+    return title.strip()
 
 
-def extract_category_from_breadcrumbs(soup):
-    crumbs = []
-    selectors = [
-        "nav a[href]",
-        ".breadcrumb a[href]",
-        ".breadcrumbs a[href]",
-        "[itemprop='itemListElement'] a[href]",
-    ]
-
-    for selector in selectors:
-        for a in soup.select(selector):
-            href = a.get("href", "")
-            text = normalize_space(a.get_text(" ", strip=True))
-            if not text:
-                continue
-            if "/catalog/" in href and "/catalog/item/" not in href:
-                crumbs.append(text)
-
-    for text in reversed(crumbs):
-        if text not in ("Главная", "Сдать анализы", "Анализы"):
-            return text
-
-    return None
-
-
-def extract_price(soup):
-    text = soup.get_text("\n", strip=True)
+def extract_price_from_item_page(soup):
+    text = soup.get_text(" ", strip=True)
 
     patterns = [
-        r"Стоимость:\s*([\d\s]+)\s*₽",
-        r"Стоимость:\s*([\d\s]+)\s*руб",
-        r"Цена:\s*([\d\s]+)\s*₽",
-        r"Цена:\s*([\d\s]+)\s*руб",
+        r"Стоимость[:\s]+([\d\s]+)\s*₽",
+        r"Стоимость[:\s]+([\d\s]+)\s*руб",
+        r"Цена[:\s]+([\d\s]+)\s*₽",
+        r"Цена[:\s]+([\d\s]+)\s*руб",
+        r"([\d\s]+)\s*₽"
     ]
-    for pattern in patterns:
-        m = re.search(pattern, text, flags=re.I | re.S)
+
+    for p in patterns:
+        m = re.search(p, text, flags=re.I)
         if m:
             price = clean_price(m.group(1))
             if price:
                 return price
-
-    prices = re.findall(r"([\d\s]{2,})\s*(?:₽|руб)", text, flags=re.I)
-    cleaned = []
-    for p in prices:
-        val = clean_price(p)
-        if val:
-            cleaned.append(val)
-    if cleaned:
-        return cleaned[0]
-
     return None
 
 
-def parse_item_page(item_url, fallback_category):
-    soup = soupify(item_url)
+def extract_category(soup):
+    crumbs = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        txt = " ".join(a.get_text(" ", strip=True).split())
+        if "/catalog/" in href and "/catalog/item/" not in href and txt:
+            crumbs.append(txt)
 
-    code = extract_code_from_url(item_url)
-    if not code:
-        return None
-    if is_complex_code(code):
+    for txt in reversed(crumbs):
+        if txt.lower() not in ["главная", "сдать анализы", "анализы", "все анализы"]:
+            return txt
+
+    return "Анализы"
+
+
+def parse_item_page(url):
+    html = fetch(url)
+    if not html:
         return None
 
-    title = extract_title(soup)
-    if not title:
-        return None
-    if is_bad_name(title):
+    soup = BeautifulSoup(html, "html.parser")
+
+    title = extract_title_from_item_page(soup)
+    if not is_valid(title):
         return None
 
-    category = extract_category_from_breadcrumbs(soup)
-    if not category:
-        category = fallback_category or LAB_NAME
-    if category in SKIP_SECTION_TITLES:
-        return None
-
-    price = extract_price(soup)
+    price = extract_price_from_item_page(soup)
     if not price:
         return None
 
+    code_match = re.search(r"/catalog/item/(\d{2}-\d{3})", url)
+    code = code_match.group(1) if code_match else None
+    if not code:
+        return None
+
+    if code.startswith("40-"):
+        return None
+
+    category = extract_category(soup)
+
     return {
+        "_code": code,
         "lab": LAB_NAME,
         "city": CITY_NAME,
         "category": category,
         "analysis_name": title,
         "price": price,
-        "url": item_url,
-        "_code": code,
+        "url": url
     }
 
 
-def parse_listing_page(listing_url, fallback_category):
-    soup = soupify(listing_url)
-    item_urls = OrderedDict()
+def parse_listing_page(url):
+    html = fetch(url)
+    if not html:
+        return [], []
 
-    for a in soup.select("a[href]"):
-        href = absolute_url(a.get("href"))
-        if not href:
-            continue
-        if not is_analysis_item_url(href):
+    soup = BeautifulSoup(html, "html.parser")
+
+    item_links = OrderedDict()
+    next_links = OrderedDict()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        full = urljoin(BASE_URL, href)
+
+        if "/catalog/item/" in full:
+            item_links[full] = True
+
+        if "/ivanovo/catalog/" in full and "/catalog/item/" not in full:
+            next_links[full] = True
+
+        if "?page=" in full:
+            next_links[full] = True
+
+    return list(item_links.keys()), list(next_links.keys())
+
+
+def crawl():
+    visited_pages = set()
+    queue = [START_URL]
+    data = OrderedDict()
+
+    while queue:
+        page_url = queue.pop(0)
+
+        if page_url in visited_pages:
             continue
 
-        code = extract_code_from_url(href)
-        if not code:
-            continue
-        if is_complex_code(code):
-            continue
+        visited_pages.add(page_url)
 
-        item_urls[href] = True
+        item_links, next_links = parse_listing_page(page_url)
+
+        for item_url in item_links:
+            row = parse_item_page(item_url)
+            if not row:
+                continue
+            key = row["_code"]
+            if key not in data:
+                data[key] = row
+
+        for nxt in next_links:
+            if nxt not in visited_pages:
+                queue.append(nxt)
+
+        if len(visited_pages) > 3000:
+            break
 
     rows = []
-    for item_url in item_urls.keys():
-        try:
-            row = parse_item_page(item_url, fallback_category)
-            if row:
-                rows.append(row)
-        except Exception:
-            continue
-
-    return rows, extract_last_page(soup)
-
-
-def collect_all():
-    rows_by_code = OrderedDict()
-    category_links = extract_category_links()
-
-    for category_url, category_name in category_links.items():
-        try:
-            first_page_soup = soupify(category_url)
-            last_page = extract_last_page(first_page_soup)
-        except Exception:
-            continue
-
-        if last_page < 1:
-            last_page = 1
-
-        for page_num in range(1, last_page + 1):
-            if page_num == 1:
-                page_url = category_url
-            else:
-                page_url = canonical_page_url(category_url, page_num)
-
-            try:
-                rows, _ = parse_listing_page(page_url, category_name)
-            except Exception:
-                continue
-
-            for row in rows:
-                code = row["_code"]
-                if code not in rows_by_code:
-                    rows_by_code[code] = row
-
-    final_rows = []
-    for row in rows_by_code.values():
-        if is_bad_name(row["analysis_name"]):
-            continue
-        if row["category"] in SKIP_SECTION_TITLES:
-            continue
-        final_rows.append({
+    for row in data.values():
+        rows.append({
             "lab": row["lab"],
             "city": row["city"],
             "category": row["category"],
             "analysis_name": row["analysis_name"],
             "price": row["price"],
-            "url": row["url"],
+            "url": row["url"]
         })
 
-    final_rows.sort(key=lambda x: (x["category"], x["analysis_name"]))
-    return final_rows
+    rows.sort(key=lambda x: (x["category"], x["analysis_name"]))
+    return rows
 
 
 def save_csv(rows):
-    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
+    with open(CSV_PATH, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["lab", "city", "category", "analysis_name", "price", "url"],
+            fieldnames=["lab", "city", "category", "analysis_name", "price", "url"]
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -396,27 +234,27 @@ def save_xlsx(rows):
     wb = Workbook()
     ws = wb.active
     ws.title = "helix"
-    headers = ["lab", "city", "category", "analysis_name", "price", "url"]
-    ws.append(headers)
-    for row in rows:
-        ws.append([row[h] for h in headers])
-    wb.save(OUTPUT_XLSX)
+    ws.append(["lab", "city", "category", "analysis_name", "price", "url"])
+
+    for r in rows:
+        ws.append([r["lab"], r["city"], r["category"], r["analysis_name"], r["price"], r["url"]])
+
+    wb.save(XLSX_PATH)
 
 
 def main():
-    ensure_output_dir()
+    ensure_output()
+
     rows = []
     try:
-        rows = collect_all()
+        rows = crawl()
     except Exception as e:
-        print("crawl_error:", str(e))
+        print("ERROR:", e)
 
     save_csv(rows)
     save_xlsx(rows)
 
-    print("done:", len(rows), "rows")
-    print(OUTPUT_CSV)
-    print(OUTPUT_XLSX)
+    print("DONE:", len(rows))
 
 
 if __name__ == "__main__":
