@@ -1,0 +1,30 @@
+name: Update prices
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.10
+
+      - name: Install deps
+        run: pip install pandas openpyxl
+
+      - name: Run build
+        run: python build_data.py
+
+      - name: Commit data.json
+        run: |
+          git config --global user.name "bot"
+          git config --global user.email "bot@bot.com"
+          git add data.json
+          git commit -m "update prices" || echo "no changes"
+          git push
