@@ -12,15 +12,15 @@ on:
         required: false
         default: "all"
   schedule:
-    # каждые 2 суток — в 03:00 UTC по нечётным дням (1, 3, 5, ...)
+    # каждые 2 суток — в 03:00 UTC по нечётным дням
     - cron: "0 3 1-31/2 * *"
 
 jobs:
+  # ── ШАГ 1: Парсинг (матрица лаб × регионов) ──────────────────────────────
   parse:
     name: "${{ matrix.lab }} / ${{ matrix.region }}"
     runs-on: ubuntu-latest
     timeout-minutes: 240
-    # Продолжать остальные job'ы даже если один упал
     continue-on-error: true
 
     strategy:
@@ -92,3 +92,71 @@ jobs:
             output/${{ matrix.lab }}_${{ matrix.region }}.xlsx
           if-no-files-found: warn
           retention-days: 30
+
+  # ── ШАГ 2: ETL + деплой (запускается после всех парсеров) ────────────────
+  etl_and_deploy:
+    name: "ETL → data/*.json → FTP"
+    runs-on: ubuntu-latest
+    # Ждём завершения всех парсеров (даже если некоторые упали)
+    needs: parse
+    if: always()
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas openpyxl
+
+      - name: Download all parser artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: output
+          merge-multiple: true
+
+      - name: Show downloaded files
+        run: |
+          echo "=== Downloaded xlsx/csv ==="
+          find output -name "*.xlsx" -o -name "*.csv" | sort
+          echo "Total xlsx: $(find output -name '*.xlsx' | wc -l)"
+
+      - name: Run ETL — build per-city JSON
+        run: |
+          mkdir -p data
+          python etl.py --outdir output --datadir data
+
+      - name: Show generated JSON files
+        run: |
+          echo "=== Generated data/*.json ==="
+          ls -lah data/
+          for f in data/*.json; do
+            echo "--- $f ---"
+            python -c "
+          import json, sys
+          d = json.load(open('$f'))
+          slugs = len(d['prices'])
+          cells = sum(len(v) for v in d['prices'].values())
+          labs  = d.get('labs', [])
+          print(f\"city={d['city']} updated={d['updated']} slugs={slugs} cells={cells}\")
+          print(f\"labs={labs}\")
+          "
+          done
+
+      - name: Deploy data/*.json to Beget via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server:   ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USER }}
+          password: ${{ secrets.FTP_PASS }}
+          local-dir:  ./data/
+          server-dir: /data/
+          exclude: |
+            **/.git*
+            **/.git*/**
