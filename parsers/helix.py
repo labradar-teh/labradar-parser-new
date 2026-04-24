@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Helix parser — Иваново и Кострома.
-
-Улучшения vs оригинала:
-- параметризован по региону
-- исправлена фильтрация: убрано слишком агрессивное «комплекс» (helix продаёт панели!)
-- retry-сессия через helpers
-- RunStats
-- корректный обход пагинации: /catalog/<id>/?page=N
-- код анализа из URL используется как уникальный ключ дедупликации
+Helix parser — Иваново, Кострома, Ярославль.
 """
 
 import argparse
@@ -34,15 +26,14 @@ from helpers.stats import RunStats
 LAB = "helix"
 BASE_URL = "https://helix.ru"
 
-# Helix использует числовые ID в URL категорий
 CITY_CONFIG = {
     "ivanovo": ("Иваново", "https://helix.ru/ivanovo/catalog/190-vse-analizy", "ivanovo"),
     "kostroma": ("Кострома", "https://helix.ru/kostroma/catalog/", "kostroma"),
+    "yaroslavl": ("Ярославль", "https://helix.ru/yaroslavl/catalog/", "yaroslavl"),
 }
 
-CRUMB_BLACKLIST = {"Главная", "Сдать анализы", "Анализы", "Все анализы", "Иваново", "Кострома"}
+CRUMB_BLACKLIST = {"Главная", "Сдать анализы", "Анализы", "Все анализы", "Иваново", "Кострома", "Ярославль"}
 
-# Helix специфика: коды, начинающиеся с 40- — это услуги забора
 _CODE_RE = re.compile(r"/catalog/item/(\d{2}-\d{3})")
 
 
@@ -70,11 +61,10 @@ def check_region_exists(session, region: str, start_url: str) -> bool:
     return "404" not in title_text and "не найден" not in title_text.lower()
 
 
-def extract_links(html: str, region: str) -> tuple[list[str], list[str]]:
-    """Возвращает (item_links, catalog_links)."""
+def extract_links(html: str, region: str) -> tuple:
     soup = BeautifulSoup(html, "html.parser")
-    items: OrderedDict[str, None] = OrderedDict()
-    cats: OrderedDict[str, None] = OrderedDict()
+    items: OrderedDict = OrderedDict()
+    cats: OrderedDict = OrderedDict()
 
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
@@ -83,7 +73,6 @@ def extract_links(html: str, region: str) -> tuple[list[str], list[str]]:
             items[full] = None
         elif is_helix_catalog_url(full, region):
             cats[full] = None
-        # пагинация
         if "?page=" in full:
             cats[full] = None
 
@@ -118,7 +107,6 @@ def extract_category(soup: BeautifulSoup, region: str) -> str:
     cat = category_from_breadcrumbs(soup, CRUMB_BLACKLIST)
     if cat:
         return cat
-    # fallback по ссылкам
     for a in soup.find_all("a", href=True):
         href = a["href"]
         txt = clean_text(a.get_text(" ", strip=True))
@@ -128,9 +116,7 @@ def extract_category(soup: BeautifulSoup, region: str) -> str:
     return "Анализы"
 
 
-def parse_item_page(
-    session, url: str, city: str, region: str, delay: float, stats: RunStats
-) -> Optional[dict]:
+def parse_item_page(session, url: str, city: str, region: str, delay: float, stats: RunStats) -> Optional[dict]:
     html = polite_fetch(session, url, delay=delay, label=LAB)
     if not html:
         stats.page_err(url)
@@ -139,14 +125,12 @@ def parse_item_page(
     stats.card_found()
     soup = BeautifulSoup(html, "html.parser")
 
-    # код анализа из URL
     code_m = _CODE_RE.search(url)
     if not code_m:
         stats.row_filtered("нет кода анализа в URL")
         return None
     code = code_m.group(1)
 
-    # услуги забора: коды 40-xxx
     if code.startswith("40-"):
         stats.row_filtered("код 40-xxx (забор)")
         return None
@@ -156,7 +140,6 @@ def parse_item_page(
         stats.row_filtered("нет названия")
         return None
 
-    # убираем «в Иваново» / «в Костроме» из названия если попало
     name = re.sub(r"\s+в\s+\S+\s*$", "", name, flags=re.I).strip()
 
     reason = is_trash_name(name) or is_trash_url(url)
@@ -205,9 +188,9 @@ def run(region: str, outdir: Path, delay: float) -> int:
         export_rows([], outdir / f"{LAB}_{region}.csv", outdir / f"{LAB}_{region}.xlsx")
         return 0
 
-    visited_pages: set[str] = set()
+    visited_pages: set = set()
     queue = [start_url]
-    data: OrderedDict[str, dict] = OrderedDict()
+    data: OrderedDict = OrderedDict()
 
     while queue:
         page_url = queue.pop(0)
