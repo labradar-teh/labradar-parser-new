@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gemotest parser — Иваново и Кострома.
-
-Улучшения vs оригинала:
-- параметризован по региону
-- parse_next_data_links: извлекает ссылки из __NEXT_DATA__ (Next.js)
-- extract_price: 3-уровневый fallback
-- RunStats
-- фильтрация через helpers/filters.py
-- для Костромы: /kostroma/catalog/ (если нет — фиксируем в логах и не падаем)
+Gemotest parser — Иваново, Кострома, Ярославль.
 """
 
 import argparse
@@ -38,10 +30,11 @@ BASE_URL = "https://gemotest.ru"
 CITY_CONFIG = {
     "ivanovo": ("Иваново", "/ivanovo/catalog/"),
     "kostroma": ("Кострома", "/kostroma/catalog/"),
+    "yaroslavl": ("Ярославль", "/yaroslavl/catalog/"),
 }
 
 CRUMB_BLACKLIST = {
-    "Главная", "Иваново", "Кострома",
+    "Главная", "Иваново", "Кострома", "Ярославль",
     "Каталог анализов и услуг", "Каталог", "Анализы",
 }
 
@@ -74,10 +67,10 @@ def is_detail_url(url: str, region: str) -> bool:
     return True
 
 
-def extract_links(html: str, region: str) -> list[str]:
+def extract_links(html: str, region: str) -> list:
     soup = BeautifulSoup(html, "html.parser")
-    seen: set[str] = set()
-    result: list[str] = []
+    seen: set = set()
+    result: list = []
 
     def add(href: str):
         h = normalize_url(href)
@@ -88,7 +81,6 @@ def extract_links(html: str, region: str) -> list[str]:
     for a in soup.find_all("a", href=True):
         add(a["href"])
 
-    # ссылки из __NEXT_DATA__
     for block in re.findall(
         r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
         html, flags=re.DOTALL | re.IGNORECASE
@@ -101,7 +93,6 @@ def extract_links(html: str, region: str) -> list[str]:
             if catalog_prefix(region) in value:
                 add(value)
 
-    # raw regex fallback
     pfx = catalog_prefix(region)
     for raw in re.findall(re.escape(pfx) + r'[^"\'\s<>]+', html):
         add(raw)
@@ -121,12 +112,10 @@ def _walk_strings(obj):
 
 
 def check_region_exists(session, region: str) -> bool:
-    """Проверяет, что у региона есть каталог. Для Костромы может не быть."""
     url = BASE_URL + catalog_prefix(region)
     html = safe_fetch(session, url, label=LAB)
     if not html:
         return False
-    # Если нас редиректнули на главную или выдали 404-подобную страницу
     soup = BeautifulSoup(html, "html.parser")
     title_text = clean_text(soup.title.get_text() if soup.title else "")
     if "404" in title_text or "не найден" in title_text.lower():
@@ -144,7 +133,6 @@ def extract_price(soup: BeautifulSoup) -> Optional[int]:
             if val:
                 return val
 
-    # fallback по верхней части страницы
     chunks = []
     for node in soup.find_all(["h1","h2","div","section","span","p"], limit=250):
         txt = clean_text(node.get_text(" ", strip=True))
@@ -154,7 +142,6 @@ def extract_price(soup: BeautifulSoup) -> Optional[int]:
     if val:
         return val
 
-    # последний fallback — вся страница
     return extract_price_from_text(clean_text(soup.get_text(" ")))
 
 
@@ -163,12 +150,10 @@ def extract_category(soup: BeautifulSoup) -> str:
     return cat if cat else "Без категории"
 
 
-def collect_detail_urls(
-    session, start_url: str, region: str, delay: float, stats: RunStats
-) -> list[str]:
+def collect_detail_urls(session, start_url: str, region: str, delay: float, stats: RunStats) -> list:
     queue = [start_url]
-    visited: set[str] = set()
-    detail_urls: OrderedDict[str, None] = OrderedDict()
+    visited: set = set()
+    detail_urls: OrderedDict = OrderedDict()
 
     while queue:
         url = queue.pop(0)
@@ -203,9 +188,7 @@ def collect_detail_urls(
     return list(detail_urls.keys())
 
 
-def parse_analysis_page(
-    session, url: str, city: str, delay: float, stats: RunStats
-) -> Optional[dict]:
+def parse_analysis_page(session, url: str, city: str, delay: float, stats: RunStats) -> Optional[dict]:
     html = polite_fetch(session, url, delay=delay, label=LAB)
     if not html:
         stats.page_err(url)
@@ -261,14 +244,12 @@ def run(region: str, outdir: Path, delay: float) -> int:
     print(f"[{LAB}] Starting {city_name}, start_url={start_url}", file=sys.stderr)
     session = build_session()
 
-    # Проверяем наличие регионального каталога
     if not check_region_exists(session, region):
         print(
             f"[{LAB}][warn] Региональный каталог не найден для {city_name} ({start_url}). "
             f"Пропускаем без ошибки.",
             file=sys.stderr,
         )
-        # Создаём пустые файлы
         slug = region
         export_rows([], outdir / f"{LAB}_{slug}.csv", outdir / f"{LAB}_{slug}.xlsx")
         return 0
@@ -276,7 +257,7 @@ def run(region: str, outdir: Path, delay: float) -> int:
     detail_urls = collect_detail_urls(session, start_url, region, delay, stats)
     print(f"[{LAB}] collected detail urls: {len(detail_urls)}", file=sys.stderr)
 
-    rows: list[dict] = []
+    rows: list = []
     for i, url in enumerate(detail_urls, 1):
         row = parse_analysis_page(session, url, city_name, delay, stats)
         if row:
